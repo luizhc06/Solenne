@@ -62,7 +62,7 @@ Tom e formato:
 - Nunca responda so com "depende, cada um e unico" - quando apropriado, escolha um lado e explique por que.
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
-- Comandos que voce realmente tem: /help, /ask, /play, /skip, /pause, /resume,
+- Comandos que voce realmente tem: /help, /ask, /join, /play, /skip, /pause, /resume,
   /stop, /queue, /kick, /addrole, /removerole, /criarcanal, /apagarcanal, /lock, /unlock.
 - Voce NAO tem: previsao do tempo, lembretes/agenda, busca na Wikipedia, calculadora,
   nem qualquer outro comando que nao esteja na lista acima.
@@ -603,7 +603,8 @@ async def help_cmd(interaction: discord.Interaction):
     embed.add_field(
         name="🎵 Musica",
         value=(
-            "`/play <nome ou link>` — toca (ou entra na fila)\n"
+            "`/join` — entra no seu canal de voz\n"
+            "`/play <nome ou link>` — toca (ou entra na fila), entra na call sozinha se precisar\n"
             "`/skip` — pula\n"
             "`/pause` / `/resume` — pausa/retoma\n"
             "`/stop` — para tudo e sai do canal\n"
@@ -649,6 +650,25 @@ async def ask(interaction: discord.Interaction, pergunta: str):
 
 
 # ---------------- Slash commands: musica ----------------
+
+@bot.tree.command(name="join", description="Entra no seu canal de voz")
+async def join(interaction: discord.Interaction):
+    if interaction.user.voice is None:
+        await interaction.response.send_message("Voce precisa estar em um canal de voz.")
+        return
+
+    channel = interaction.user.voice.channel
+    vc = interaction.guild.voice_client
+    if vc is None:
+        await channel.connect()
+    elif vc.channel != channel:
+        await vc.move_to(channel)
+    else:
+        await interaction.response.send_message(f"Ja estou em {channel.mention}.")
+        return
+
+    await interaction.response.send_message(f"Entrei em {channel.mention}.")
+
 
 @bot.tree.command(name="play", description="Toca uma musica (nome ou link do YouTube)")
 @app_commands.describe(busca="Nome da musica ou link do YouTube")
