@@ -62,7 +62,7 @@ Tom e formato:
 - Nunca responda so com "depende, cada um e unico" - quando apropriado, escolha um lado e explique por que.
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
-- Comandos que voce realmente tem: /help, /ask, /join, /play, /skip, /pause, /resume,
+- Comandos que voce realmente tem: /help, /ask, /join, /play, /skip, /pause, /resume, /nowplaying,
   /stop, /queue, /kick, /addrole, /removerole, /criarcanal, /apagarcanal, /lock, /unlock.
 - Voce NAO tem: previsao do tempo, lembretes/agenda, busca na Wikipedia, calculadora,
   nem qualquer outro comando que nao esteja na lista acima.
@@ -125,6 +125,9 @@ class HermesBot(discord.Client):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self.queues: dict[int, list[dict]] = {}
+        self.now_playing_channel: dict[int, int] = {}
+        self.now_playing_track: dict[int, dict] = {}
+        self.idle_tasks: dict[int, asyncio.Task] = {}
         # (guild_id, user_id) -> deque[(timestamp, message_id, content, channel_id)]
         self.msg_log: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
         self.recently_punished: dict[tuple[int, int], float] = {}
@@ -373,6 +376,9 @@ async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id
 
 # ---------------- Music ----------------
 
+IDLE_DISCONNECT_SECONDS = 300  # desconecta sozinha se ficar 5min sem tocar nada
+
+
 async def extract_track(query: str) -> dict:
     loop = asyncio.get_event_loop()
 
@@ -385,11 +391,91 @@ async def extract_track(query: str) -> dict:
     return await loop.run_in_executor(None, _extract)
 
 
-def play_next(guild_id: int, voice_client: discord.VoiceClient):
+def now_playing_embed(track: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="🎶 Tocando agora",
+        description=f"**{track['title']}**",
+        color=discord.Color.blurple(),
+    )
+    return embed
+
+
+class PlayerControls(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Pausar/Retomar", style=discord.ButtonStyle.primary, emoji="⏯️")
+    async def toggle_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if vc is None:
+            await interaction.response.send_message("Nao estou conectada.", ephemeral=True)
+        elif vc.is_playing():
+            vc.pause()
+            await interaction.response.send_message("Pausado.", ephemeral=True)
+        elif vc.is_paused():
+            vc.resume()
+            await interaction.response.send_message("Retomado.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nada tocando agora.", ephemeral=True)
+
+    @discord.ui.button(label="Pular", style=discord.ButtonStyle.secondary, emoji="⏭️")
+    async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+            await interaction.response.send_message("Pulado.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nada tocando agora.", ephemeral=True)
+
+    @discord.ui.button(label="Parar", style=discord.ButtonStyle.danger, emoji="⏹️")
+    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await stop_playback(interaction.guild)
+        await interaction.response.send_message("Parado e desconectada.", ephemeral=True)
+
+
+async def stop_playback(guild: discord.Guild):
+    guild_id = guild.id
+    bot.queues[guild_id] = []
+    bot.now_playing_track.pop(guild_id, None)
+    _cancel_idle_task(guild_id)
+    vc = guild.voice_client
+    if vc:
+        vc.stop()
+        await vc.disconnect(force=True)
+
+
+def _cancel_idle_task(guild_id: int):
+    task = bot.idle_tasks.get(guild_id)
+    if task and not task.done():
+        task.cancel()
+
+
+def _schedule_idle_disconnect(guild_id: int, voice_client: discord.VoiceClient):
+    _cancel_idle_task(guild_id)
+    bot.idle_tasks[guild_id] = asyncio.create_task(_idle_disconnect(guild_id, voice_client))
+
+
+async def _idle_disconnect(guild_id: int, voice_client: discord.VoiceClient):
+    try:
+        await asyncio.sleep(IDLE_DISCONNECT_SECONDS)
+    except asyncio.CancelledError:
+        return
+    if voice_client.is_connected() and not voice_client.is_playing() and not voice_client.is_paused():
+        log.info("Desconectando por inatividade no servidor %s", guild_id)
+        await voice_client.disconnect(force=True)
+        bot.queues[guild_id] = []
+
+
+def play_next(guild_id: int, voice_client: discord.VoiceClient) -> dict | None:
     queue = bot.queues.get(guild_id, [])
     if not queue:
-        return
+        _schedule_idle_disconnect(guild_id, voice_client)
+        return None
+
+    _cancel_idle_task(guild_id)
     track = queue.pop(0)
+    bot.now_playing_track[guild_id] = track
     source = discord.FFmpegPCMAudio(track["url"], **FFMPEG_OPTS)
 
     def after(err):
@@ -402,10 +488,39 @@ def play_next(guild_id: int, voice_client: discord.VoiceClient):
             log.exception("Erro ao avancar fila")
 
     voice_client.play(source, after=after)
+    return track
 
 
 async def _advance(guild_id: int, voice_client: discord.VoiceClient):
-    play_next(guild_id, voice_client)
+    track = play_next(guild_id, voice_client)
+    if track is None:
+        return
+    channel_id = bot.now_playing_channel.get(guild_id)
+    channel = bot.get_channel(channel_id) if channel_id else None
+    if channel:
+        await channel.send(embed=now_playing_embed(track), view=PlayerControls(guild_id))
+
+
+@bot.event
+async def on_voice_state_update(
+    member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
+):
+    if member.bot:
+        return
+    vc = member.guild.voice_client
+    if vc is None or vc.channel is None:
+        return
+    if before.channel != vc.channel and after.channel != vc.channel:
+        return
+
+    await asyncio.sleep(15)
+    vc = member.guild.voice_client
+    if vc is None or vc.channel is None:
+        return
+    humans = [m for m in vc.channel.members if not m.bot]
+    if not humans:
+        log.info("Saindo do canal de voz - ninguem mais la (guild %s)", member.guild.id)
+        await stop_playback(member.guild)
 
 
 # ---------------- Anti-flood / automod ----------------
@@ -611,7 +726,9 @@ async def help_cmd(interaction: discord.Interaction):
             "`/skip` — pula\n"
             "`/pause` / `/resume` — pausa/retoma\n"
             "`/stop` — para tudo e sai do canal\n"
-            "`/queue` — mostra a fila"
+            "`/queue` — mostra a fila\n"
+            "`/nowplaying` — mostra a musica atual com botoes de controle\n"
+            "Eu saio sozinha se ficar sozinha no canal ou parada por 5 minutos."
         ),
         inline=False,
     )
@@ -724,11 +841,12 @@ async def play(interaction: discord.Interaction, busca: str):
         await interaction.followup.send("Nao consegui achar/baixar essa musica.")
         return
 
+    bot.now_playing_channel[interaction.guild_id] = interaction.channel_id
     bot.queues.setdefault(interaction.guild_id, []).append(track)
 
     if not vc.is_playing() and not vc.is_paused():
         play_next(interaction.guild_id, vc)
-        await interaction.followup.send(f"Tocando agora: **{track['title']}**")
+        await interaction.followup.send(embed=now_playing_embed(track), view=PlayerControls(interaction.guild_id))
     else:
         await interaction.followup.send(f"Adicionado na fila: **{track['title']}**")
 
@@ -741,6 +859,18 @@ async def skip(interaction: discord.Interaction):
         await interaction.response.send_message("Pulado.")
     else:
         await interaction.response.send_message("Nada tocando agora.")
+
+
+@bot.tree.command(name="nowplaying", description="Mostra o que esta tocando com os controles")
+async def nowplaying(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    track = bot.now_playing_track.get(interaction.guild_id)
+    if not vc or not track or (not vc.is_playing() and not vc.is_paused()):
+        await interaction.response.send_message("Nada tocando agora.")
+        return
+    await interaction.response.send_message(
+        embed=now_playing_embed(track), view=PlayerControls(interaction.guild_id)
+    )
 
 
 @bot.tree.command(name="pause", description="Pausa a musica atual")
@@ -765,12 +895,8 @@ async def resume(interaction: discord.Interaction):
 
 @bot.tree.command(name="stop", description="Para a musica, limpa a fila e sai do canal")
 async def stop(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    bot.queues[interaction.guild_id] = []
-    if vc:
-        vc.stop()
-        await vc.disconnect()
-    await interaction.response.send_message("Parado e desconectado.")
+    await stop_playback(interaction.guild)
+    await interaction.response.send_message("Parado e desconectada.")
 
 
 @bot.tree.command(name="queue", description="Mostra a fila de musicas")
