@@ -377,6 +377,22 @@ async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id
 # ---------------- Music ----------------
 
 IDLE_DISCONNECT_SECONDS = 300  # desconecta sozinha se ficar 5min sem tocar nada
+VOICE_CONNECT_ATTEMPTS = 3
+
+
+async def connect_voice(channel: discord.VoiceChannel) -> discord.VoiceClient:
+    last_error: Exception | None = None
+    for attempt in range(1, VOICE_CONNECT_ATTEMPTS + 1):
+        try:
+            return await channel.connect(self_deaf=True, timeout=30, reconnect=False)
+        except Exception as exc:
+            last_error = exc
+            log.warning(
+                "Falha ao conectar na voz (tentativa %s/%s): %s", attempt, VOICE_CONNECT_ATTEMPTS, exc
+            )
+            if attempt < VOICE_CONNECT_ATTEMPTS:
+                await asyncio.sleep(2)
+    raise last_error
 
 
 async def extract_track(query: str) -> dict:
@@ -789,7 +805,7 @@ async def join(interaction: discord.Interaction):
         vc = interaction.guild.voice_client
         try:
             if vc is None:
-                await channel.connect(self_deaf=True, timeout=30, reconnect=False)
+                await connect_voice(channel)
             elif vc.channel != channel:
                 await vc.move_to(channel)
             else:
@@ -798,7 +814,8 @@ async def join(interaction: discord.Interaction):
         except Exception:
             log.exception("Erro ao conectar no canal de voz")
             await interaction.followup.send(
-                "Nao consegui conectar no canal de voz (a conexao caiu no meio do caminho). Tenta de novo."
+                "Nao consegui conectar no canal de voz depois de varias tentativas. "
+                "Pode ser instabilidade momentanea, tenta de novo em um instante."
             )
             return
 
@@ -824,13 +841,14 @@ async def play(interaction: discord.Interaction, busca: str):
         vc = interaction.guild.voice_client
         try:
             if vc is None:
-                vc = await channel.connect(self_deaf=True, timeout=30, reconnect=False)
+                vc = await connect_voice(channel)
             elif vc.channel != channel:
                 await vc.move_to(channel)
         except Exception:
             log.exception("Erro ao conectar no canal de voz")
             await interaction.followup.send(
-                "Nao consegui conectar no canal de voz (a conexao caiu no meio do caminho). Tenta de novo."
+                "Nao consegui conectar no canal de voz depois de varias tentativas. "
+                "Pode ser instabilidade momentanea, tenta de novo em um instante."
             )
             return
 
