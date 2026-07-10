@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import sqlite3
 import asyncio
@@ -90,9 +91,15 @@ def is_ambient_channel(channel) -> bool:
     return any(target in name for target in AMBIENT_CHANNEL_NAMES)
 
 
+URL_PATTERN = re.compile(r"https?://\S+")
+
+
 def looks_like_question(content: str) -> bool:
     content = content.strip()
-    return "?" in content and len(content) > 6
+    if content.startswith("/"):
+        return False
+    without_urls = URL_PATTERN.sub("", content)
+    return "?" in without_urls and len(content) > 6
 
 intents = discord.Intents.default()
 intents.message_content = True
