@@ -146,21 +146,65 @@ async def enforce_guild_lock():
             await guild.leave()
 
 
-# ---------------- Hermes chat ----------------
+# ---------------- Hermes chat (raciocinio em multiplas passadas) ----------------
 
-def ask_hermes(channel_id: int, user_msg: str) -> str:
+REFINEMENT_ROUNDS = 3  # rascunho + N refinos + humanizacao = 5 passadas no total
+
+CRITIQUE_PROMPT = (
+    "Releia sua resposta anterior com espirito critico, como se fosse outra pessoa "
+    "revisando. Aponte pra si mesma: falhas de logica, coisas incertas apresentadas "
+    "com confianca demais, floreio ou enrolacao desnecessaria, partes genericas demais. "
+    "Depois reescreva uma versao melhor: mais precisa, mais direta, cortando o que "
+    "sobrou. Responda somente com a nova versao da resposta, sem comentar o processo "
+    "nem citar a critica."
+)
+
+HUMANIZE_PROMPT = (
+    "Reescreva essa resposta final para soar como uma pessoa de verdade conversando "
+    "no Discord, nao como um assistente robotico: cadencia natural, sem parecer "
+    "checklist nem relatorio, mas sem perder a precisao, o tom direto e as opinioes "
+    "que voce ja formou. Pode manter listas curtas se ajudar a clareza. Responda "
+    "somente com o texto final, pronto para enviar."
+)
+
+
+def _complete(messages: list[dict], temperature: float) -> str:
+    completion = client_ai.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=800,
+    )
+    return completion.choices[0].message.content
+
+
+def _think_and_answer(base_messages: list[dict]) -> str:
+    draft = _complete(base_messages, temperature=0.6)
+
+    for _ in range(REFINEMENT_ROUNDS):
+        refine_messages = base_messages + [
+            {"role": "assistant", "content": draft},
+            {"role": "user", "content": CRITIQUE_PROMPT},
+        ]
+        draft = _complete(refine_messages, temperature=0.5)
+
+    final_messages = base_messages + [
+        {"role": "assistant", "content": draft},
+        {"role": "user", "content": HUMANIZE_PROMPT},
+    ]
+    return _complete(final_messages, temperature=0.75)
+
+
+async def ask_hermes(channel_id: int, user_msg: str) -> str:
     history = bot.histories.setdefault(channel_id, [])
     history.append({"role": "user", "content": user_msg})
     history[:] = history[-20:]
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
-    completion = client_ai.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0.6,
-        max_tokens=800,
-    )
-    reply = completion.choices[0].message.content
+    base_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+
+    loop = asyncio.get_event_loop()
+    reply = await loop.run_in_executor(None, _think_and_answer, base_messages)
+
     history.append({"role": "assistant", "content": reply})
     return reply
 
@@ -368,7 +412,7 @@ async def on_message(message: discord.Message):
 
     async with message.channel.typing():
         try:
-            reply = ask_hermes(message.channel.id, content)
+            reply = await ask_hermes(message.channel.id, content)
         except Exception:
             log.exception("Erro ao consultar Hermes")
             reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
@@ -384,7 +428,7 @@ async def on_message(message: discord.Message):
 async def ask(interaction: discord.Interaction, pergunta: str):
     await interaction.response.defer(thinking=True)
     try:
-        reply = ask_hermes(interaction.channel_id, pergunta)
+        reply = await ask_hermes(interaction.channel_id, pergunta)
     except Exception:
         log.exception("Erro ao consultar Hermes")
         reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
