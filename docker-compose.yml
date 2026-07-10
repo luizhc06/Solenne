@@ -1,0 +1,7 @@
+﻿services:
+  hermes-bot:
+    build: .
+    container_name: hermes-bot
+    restart: unless-stopped
+    env_file:
+      - .env
