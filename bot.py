@@ -1,5 +1,6 @@
 import os
 import time
+import sqlite3
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,8 @@ DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 MODEL = os.environ.get("HERMES_MODEL", "openai/gpt-oss-120b")
 ALLOWED_GUILD_ID = int(os.environ["ALLOWED_GUILD_ID"])
 OWNER_USER_ID = int(os.environ["OWNER_USER_ID"])
+DB_PATH = os.environ.get("DB_PATH", "/app/data/solenne.db")
+HISTORY_WINDOW = 20
 
 client_ai = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=NVIDIA_API_KEY)
 
@@ -103,7 +106,6 @@ class HermesBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self.histories: dict[int, list[dict]] = {}
         self.queues: dict[int, list[dict]] = {}
         # (guild_id, user_id) -> deque[(timestamp, message_id, content, channel_id)]
         self.msg_log: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
@@ -111,6 +113,7 @@ class HermesBot(discord.Client):
         self.ambient_last_reply: dict[int, float] = {}
 
     async def setup_hook(self):
+        init_db()
         await self.tree.sync()
 
 
@@ -152,6 +155,121 @@ async def enforce_guild_lock():
         if guild.id != ALLOWED_GUILD_ID:
             log.warning("Saindo de servidor nao autorizado: %s (%s)", guild.name, guild.id)
             await guild.leave()
+
+
+# ---------------- Memoria persistente (SQLite) ----------------
+
+def db_conn() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    return sqlite3.connect(DB_PATH, timeout=10)
+
+
+def init_db():
+    with db_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                author_name TEXT,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_channel ON chat_history(channel_id, id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id INTEGER PRIMARY KEY,
+                display_name TEXT,
+                summary TEXT DEFAULT '',
+                updated_at TEXT
+            )
+            """
+        )
+
+
+def save_message(channel_id: int, role: str, author_name: str | None, content: str):
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT INTO chat_history (channel_id, role, author_name, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (channel_id, role, author_name, content, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def load_recent_history(channel_id: int, limit: int = HISTORY_WINDOW) -> list[dict]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT role, author_name, content FROM chat_history "
+            "WHERE channel_id = ? ORDER BY id DESC LIMIT ?",
+            (channel_id, limit),
+        ).fetchall()
+    rows.reverse()
+    messages = []
+    for role, author_name, content in rows:
+        text = f"{author_name}: {content}" if role == "user" and author_name else content
+        messages.append({"role": role, "content": text})
+    return messages
+
+
+def get_user_summary(user_id: int) -> str:
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT summary FROM user_profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    return row[0] if row and row[0] else ""
+
+
+def save_user_summary(user_id: int, display_name: str, summary: str):
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT INTO user_profiles (user_id, display_name, summary, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "display_name = excluded.display_name, "
+            "summary = excluded.summary, "
+            "updated_at = excluded.updated_at",
+            (user_id, display_name, summary, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+PROFILE_UPDATE_PROMPT = """Voce mantem um resumo curto (no maximo 5 linhas) sobre cada pessoa
+que conversa com voce: fatos uteis e reais, preferencias, interesses, contexto recorrente,
+coisas que a pessoa pediu explicitamente pra voce lembrar. Nunca inclua bobagem generica
+nem repita a conversa toda - so o que for realmente util lembrar depois.
+
+Resumo atual sobre {name}:
+{current_summary}
+
+Nova mensagem de {name}: {message}
+
+Se a mensagem trouxer algo novo e util para lembrar sobre essa pessoa, atualize o resumo
+(maximo 5 linhas, frases curtas e diretas). Se nao trouxer nada relevante, responda
+EXATAMENTE com o resumo atual, sem mudar nada. Responda somente com o resumo atualizado,
+sem comentarios nem explicacoes."""
+
+
+def _update_profile_sync(user_id: int, name: str, message: str):
+    current = get_user_summary(user_id)
+    prompt = PROFILE_UPDATE_PROMPT.format(name=name, current_summary=current or "(vazio ainda)", message=message)
+    try:
+        new_summary = _complete([{"role": "user", "content": prompt}], temperature=0.3)
+    except Exception:
+        log.exception("Erro ao atualizar perfil de %s", name)
+        return
+    new_summary = new_summary.strip()
+    if new_summary and new_summary != current:
+        save_user_summary(user_id, name, new_summary)
+
+
+async def update_profile(user_id: int, name: str, message: str):
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _update_profile_sync, user_id, name, message)
 
 
 # ---------------- Hermes chat (raciocinio em multiplas passadas) ----------------
@@ -203,24 +321,32 @@ def _think_and_answer(base_messages: list[dict]) -> str:
     return _complete(final_messages, temperature=0.75)
 
 
-async def ask_hermes(channel_id: int, user_msg: str, author_name: str) -> str:
-    history = bot.histories.setdefault(channel_id, [])
-    history.append({"role": "user", "content": f"{author_name}: {user_msg}"})
-    history[:] = history[-20:]
+async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id: int) -> str:
+    loop = asyncio.get_event_loop()
+
+    history = await loop.run_in_executor(None, load_recent_history, channel_id)
+    profile = await loop.run_in_executor(None, get_user_summary, author_id)
 
     pergunta_atual = (
         f"Mensagem atual, de {author_name}, e a que voce deve responder agora: {user_msg}"
     )
+    system_content = SYSTEM_PROMPT
+    if profile:
+        system_content += f"\n\nO que voce ja sabe sobre {author_name}:\n{profile}"
+
     base_messages = (
-        [{"role": "system", "content": SYSTEM_PROMPT}]
-        + history[:-1]
+        [{"role": "system", "content": system_content}]
+        + history
         + [{"role": "user", "content": pergunta_atual}]
     )
 
-    loop = asyncio.get_event_loop()
     reply = await loop.run_in_executor(None, _think_and_answer, base_messages)
 
-    history.append({"role": "assistant", "content": reply})
+    await loop.run_in_executor(None, save_message, channel_id, "user", author_name, user_msg)
+    await loop.run_in_executor(None, save_message, channel_id, "assistant", None, reply)
+
+    asyncio.create_task(update_profile(author_id, author_name, user_msg))
+
     return reply
 
 
@@ -427,13 +553,64 @@ async def on_message(message: discord.Message):
 
     async with message.channel.typing():
         try:
-            reply = await ask_hermes(message.channel.id, content, message.author.display_name)
+            reply = await ask_hermes(
+                message.channel.id, content, message.author.display_name, message.author.id
+            )
         except Exception:
             log.exception("Erro ao consultar Hermes")
             reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
 
     for chunk_start in range(0, len(reply), 1900):
         await message.channel.send(reply[chunk_start:chunk_start + 1900])
+
+
+# ---------------- Slash commands: ajuda ----------------
+
+@bot.tree.command(name="help", description="Mostra os comandos da Solenne")
+async def help_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="✨ Comandos da Solenne",
+        description="Tambem respondo se me mencionar, e falo sozinha em alguns canais quando faz sentido.",
+        color=discord.Color.purple(),
+    )
+    embed.add_field(
+        name="💬 Conversa",
+        value=(
+            "`/ask <pergunta>` — pergunta algo\n"
+            "`@Solenne <mensagem>` — mesma coisa, mencionando\n"
+            "Nos canais geral, comidas, bot e videojogos-geral eu tambem respondo perguntas sozinha."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎵 Musica",
+        value=(
+            "`/play <nome ou link>` — toca (ou entra na fila)\n"
+            "`/skip` — pula\n"
+            "`/pause` / `/resume` — pausa/retoma\n"
+            "`/stop` — para tudo e sai do canal\n"
+            "`/queue` — mostra a fila"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🛡️ Moderacao (automatica)",
+        value=(
+            "Detecto flood (mensagens repetidas, muitas seguidas, spam de mencao), "
+            "apago e aplico timeout de 60s automaticamente, e mando uma DM pro dono "
+            "com a opcao de banir ou ignorar."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🔒 Admin (somente o dono)",
+        value=(
+            "`/kick` `/addrole` `/removerole` `/criarcanal` `/apagarcanal` `/lock` `/unlock`"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Rodando na sua VM, com memoria persistente por canal e por pessoa.")
+    await interaction.response.send_message(embed=embed)
 
 
 # ---------------- Slash commands: chat ----------------
@@ -443,7 +620,9 @@ async def on_message(message: discord.Message):
 async def ask(interaction: discord.Interaction, pergunta: str):
     await interaction.response.defer(thinking=True)
     try:
-        reply = await ask_hermes(interaction.channel_id, pergunta, interaction.user.display_name)
+        reply = await ask_hermes(
+            interaction.channel_id, pergunta, interaction.user.display_name, interaction.user.id
+        )
     except Exception:
         log.exception("Erro ao consultar Hermes")
         reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
