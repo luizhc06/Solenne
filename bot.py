@@ -132,7 +132,9 @@ class HermesBot(discord.Client):
 
     async def setup_hook(self):
         init_db()
-        await self.tree.sync()
+        guild = discord.Object(id=ALLOWED_GUILD_ID)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)
 
 
 bot = HermesBot()
