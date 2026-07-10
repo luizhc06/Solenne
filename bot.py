@@ -129,6 +129,7 @@ class HermesBot(discord.Client):
         self.msg_log: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
         self.recently_punished: dict[tuple[int, int], float] = {}
         self.ambient_last_reply: dict[int, float] = {}
+        self.voice_locks: dict[int, asyncio.Lock] = {}
 
     async def setup_hook(self):
         init_db()
@@ -659,17 +660,32 @@ async def join(interaction: discord.Interaction):
         await interaction.response.send_message("Voce precisa estar em um canal de voz.")
         return
 
+    await interaction.response.defer()
     channel = interaction.user.voice.channel
-    vc = interaction.guild.voice_client
-    if vc is None:
-        await channel.connect()
-    elif vc.channel != channel:
-        await vc.move_to(channel)
-    else:
-        await interaction.response.send_message(f"Ja estou em {channel.mention}.")
+
+    lock = bot.voice_locks.setdefault(interaction.guild_id, asyncio.Lock())
+    if lock.locked():
+        await interaction.followup.send("Ja estou tentando conectar, pera ai.")
         return
 
-    await interaction.response.send_message(f"Entrei em {channel.mention}.")
+    async with lock:
+        vc = interaction.guild.voice_client
+        try:
+            if vc is None:
+                await channel.connect(self_deaf=True, timeout=30, reconnect=False)
+            elif vc.channel != channel:
+                await vc.move_to(channel)
+            else:
+                await interaction.followup.send(f"Ja estou em {channel.mention}.")
+                return
+        except Exception:
+            log.exception("Erro ao conectar no canal de voz")
+            await interaction.followup.send(
+                "Nao consegui conectar no canal de voz (a conexao caiu no meio do caminho). Tenta de novo."
+            )
+            return
+
+    await interaction.followup.send(f"Entrei em {channel.mention}.")
 
 
 @bot.tree.command(name="play", description="Toca uma musica (nome ou link do YouTube)")
@@ -681,11 +697,25 @@ async def play(interaction: discord.Interaction, busca: str):
 
     await interaction.response.defer()
     channel = interaction.user.voice.channel
-    vc = interaction.guild.voice_client
-    if vc is None:
-        vc = await channel.connect()
-    elif vc.channel != channel:
-        await vc.move_to(channel)
+
+    lock = bot.voice_locks.setdefault(interaction.guild_id, asyncio.Lock())
+    if lock.locked():
+        await interaction.followup.send("Ja estou tentando conectar, pera ai.")
+        return
+
+    async with lock:
+        vc = interaction.guild.voice_client
+        try:
+            if vc is None:
+                vc = await channel.connect(self_deaf=True, timeout=30, reconnect=False)
+            elif vc.channel != channel:
+                await vc.move_to(channel)
+        except Exception:
+            log.exception("Erro ao conectar no canal de voz")
+            await interaction.followup.send(
+                "Nao consegui conectar no canal de voz (a conexao caiu no meio do caminho). Tenta de novo."
+            )
+            return
 
     try:
         track = await extract_track(busca)
