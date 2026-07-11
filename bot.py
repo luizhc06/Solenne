@@ -1,6 +1,7 @@
 import os
 import re
 import html
+import random
 import time
 import sqlite3
 import asyncio
@@ -69,7 +70,7 @@ Tom e formato:
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
 - Comandos que voce realmente tem: /help, /ask, /pesquisa, /noticias, /clima, /kick, /addrole,
-  /removerole, /criarcanal, /apagarcanal, /lock, /unlock.
+  /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar.
 - /clima mostra o clima atual (real, via Open-Meteo) e alertas oficiais de Defesa Civil/INMET.
 - /pesquisa faz busca real na web (minimo 5 fontes) e resume com links das fontes.
 - Voce NAO tem: lembretes/agenda, busca na Wikipedia, calculadora, nem qualquer outro
@@ -1357,7 +1358,8 @@ async def help_cmd(interaction: discord.Interaction):
     embed.add_field(
         name="🔒 Admin (somente o dono)",
         value=(
-            "`/kick` `/addrole` `/removerole` `/criarcanal` `/apagarcanal` `/lock` `/unlock`"
+            "`/kick` `/addrole` `/removerole` `/criarcanal` `/apagarcanal` `/lock` `/unlock`\n"
+            "`/perturbar <usuario>` — brincadeira publica no canal, poucas mensagens espacadas"
         ),
         inline=False,
     )
@@ -1473,6 +1475,55 @@ async def noticias(interaction: discord.Interaction):
         except discord.HTTPException:
             log.exception("Erro ao enviar embeds da categoria %s", category["label"])
             await interaction.followup.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
+
+
+PERTURBAR_LINHAS = [
+    "psiu {mention}, psiu",
+    "{mention} vc viu que eu to aqui ne",
+    "ei {mention} SO QUERIA FALAR OI",
+    "{mention} presta atencao em mim",
+    "{mention} responde ai vai",
+    "to entediada {mention}, fala comigo",
+    "{mention} eu sei que vc ta vendo essa mensagem",
+    "{mention}?? {mention}?? {mention}??",
+    "nao esquece de mim {mention} 🥺",
+    "{mention} adivinha quem e",
+    "oi {mention} de novo",
+    "{mention} 👀",
+    "{mention} vc dormiu?",
+    "{mention} manda um oi ai",
+    "so passando pra perturbar {mention} mesmo",
+]
+
+
+@bot.tree.command(
+    name="perturbar",
+    description="[Dono] A Solenne perturba um usuario no canal, de brincadeira, por um tempinho",
+)
+@owner_only()
+@app_commands.describe(
+    usuario="Quem vai ser perturbado",
+    vezes="Quantas mensagens (1-6, padrao 3)",
+    intervalo="Segundos entre cada mensagem (10-120, padrao 20)",
+)
+async def perturbar(
+    interaction: discord.Interaction,
+    usuario: discord.Member,
+    vezes: app_commands.Range[int, 1, 6] = 3,
+    intervalo: app_commands.Range[int, 10, 120] = 20,
+):
+    if usuario.bot:
+        await interaction.response.send_message("Nao da pra perturbar outro bot.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Combinado, vou perturbar {usuario.mention} {vezes}x aqui no canal 😈", ephemeral=True
+    )
+    channel = interaction.channel
+    linhas = random.sample(PERTURBAR_LINHAS, min(vezes, len(PERTURBAR_LINHAS)))
+    for linha in linhas:
+        await channel.send(linha.format(mention=usuario.mention))
+        await asyncio.sleep(intervalo)
 
 
 # ---------------- Slash commands: admin (somente dono) ----------------
