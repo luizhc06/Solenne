@@ -123,6 +123,12 @@ class HermesBot(discord.Client):
         guild = discord.Object(id=ALLOWED_GUILD_ID)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
+
+        # Limpa comandos globais antigos (registrados globalmente antes do sync
+        # passar a ser por servidor) para nao aparecerem duplicados no Discord.
+        self.tree.clear_commands(guild=None)
+        await self.tree.sync(guild=None)
+
         daily_news_task.start()
 
 
@@ -778,7 +784,7 @@ async def on_message(message: discord.Message):
             message.channel.id, content, message.author.display_name, message.author.id
         )
     except Exception:
-        log.exception("Erro ao consultar Hermes")
+        log.exception("Erro ao consultar Solenne")
         reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
 
     await placeholder.edit(content=reply[:1900], embed=None)
@@ -835,7 +841,7 @@ async def help_cmd(interaction: discord.Interaction):
 
 # ---------------- Slash commands: chat ----------------
 
-@bot.tree.command(name="ask", description="Pergunte algo ao Hermes")
+@bot.tree.command(name="ask", description="Pergunte algo a Solenne")
 @app_commands.describe(pergunta="O que voce quer perguntar")
 async def ask(interaction: discord.Interaction, pergunta: str):
     await interaction.response.send_message(embed=thinking_embed())
@@ -844,7 +850,7 @@ async def ask(interaction: discord.Interaction, pergunta: str):
             interaction.channel_id, pergunta, interaction.user.display_name, interaction.user.id
         )
     except Exception:
-        log.exception("Erro ao consultar Hermes")
+        log.exception("Erro ao consultar Solenne")
         reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
     await interaction.edit_original_response(content=reply[:1900], embed=None)
     for chunk_start in range(1900, len(reply), 1900):
