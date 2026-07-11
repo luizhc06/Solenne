@@ -138,6 +138,7 @@ class HermesBot(discord.Client):
 
         daily_news_task.start()
         rotate_status_task.start()
+        daily_backup_task.start()
 
 
 bot = HermesBot()
@@ -241,6 +242,14 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS posted_news (
+                link TEXT PRIMARY KEY,
+                posted_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 def save_message(channel_id: int, role: str, author_name: str | None, content: str):
@@ -288,6 +297,39 @@ def save_user_summary(user_id: int, display_name: str, summary: str):
         )
 
 
+NEWS_DEDUP_DAYS = 2
+
+
+def filter_unposted_links(links: list[str]) -> set[str]:
+    """Retorna o subconjunto de links que AINDA NAO foi postado recentemente."""
+    if not links:
+        return set()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=NEWS_DEDUP_DAYS)).isoformat()
+    placeholders = ",".join("?" for _ in links)
+    with db_conn() as conn:
+        rows = conn.execute(
+            f"SELECT link FROM posted_news WHERE link IN ({placeholders}) AND posted_at >= ?",
+            (*links, cutoff),
+        ).fetchall()
+    already_posted = {r[0] for r in rows}
+    return set(links) - already_posted
+
+
+def mark_news_posted(links: list[str]):
+    if not links:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with db_conn() as conn:
+        conn.executemany(
+            "INSERT INTO posted_news (link, posted_at) VALUES (?, ?) "
+            "ON CONFLICT(link) DO UPDATE SET posted_at = excluded.posted_at",
+            [(link, now) for link in links],
+        )
+        # Limpa entradas antigas pra tabela nao crescer pra sempre.
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=NEWS_DEDUP_DAYS * 5)).isoformat()
+        conn.execute("DELETE FROM posted_news WHERE posted_at < ?", (cutoff,))
+
+
 PROFILE_UPDATE_PROMPT = """Voce mantem um resumo curto (no maximo 5 linhas) sobre cada pessoa
 que conversa com voce: fatos uteis e reais, preferencias, interesses, contexto recorrente,
 coisas que a pessoa pediu explicitamente pra voce lembrar. Nunca inclua bobagem generica
@@ -320,6 +362,26 @@ def _update_profile_sync(user_id: int, name: str, message: str):
 async def update_profile(user_id: int, name: str, message: str):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _update_profile_sync, user_id, name, message)
+
+
+class FeedbackView(discord.ui.View):
+    """Botoes de like/dislike que alimentam o resumo de perfil da pessoa que clicou."""
+
+    def __init__(self, topic: str):
+        super().__init__(timeout=3600)
+        self.topic = topic[:200]
+
+    @discord.ui.button(label="👍", style=discord.ButtonStyle.success)
+    async def like(self, interaction: discord.Interaction, button: discord.ui.Button):
+        note = f"Gostou de conteudo sobre: {self.topic}"
+        asyncio.create_task(update_profile(interaction.user.id, interaction.user.display_name, note))
+        await interaction.response.send_message("Anotado, valeu pelo feedback! 👍", ephemeral=True)
+
+    @discord.ui.button(label="👎", style=discord.ButtonStyle.danger)
+    async def dislike(self, interaction: discord.Interaction, button: discord.ui.Button):
+        note = f"Nao gostou / achou irrelevante conteudo sobre: {self.topic}"
+        asyncio.create_task(update_profile(interaction.user.id, interaction.user.display_name, note))
+        await interaction.response.send_message("Anotado, vou ajustar. 👎", ephemeral=True)
 
 
 # ---------------- Hermes chat (raciocinio em multiplas passadas) ----------------
@@ -384,7 +446,14 @@ async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id
         pergunta_atual = (
             f"Mensagem atual, de {author_name}, e a que voce deve responder agora: {user_msg}"
         )
-        system_content = SYSTEM_PROMPT
+        agora = datetime.now(NEWS_TIMEZONE)
+        dia_semana_pt = DIAS_SEMANA[agora.weekday()]
+        system_content = (
+            SYSTEM_PROMPT
+            + f"\n\nData e hora atual: {dia_semana_pt}, {agora.strftime('%d/%m/%Y %H:%M')} "
+            f"(horario de Brasilia). Use isso se precisar saber que dia/hora e agora, "
+            f"nunca invente ou chute uma data."
+        )
         if profile:
             system_content += f"\n\nO que voce ja sabe sobre {author_name}:\n{profile}"
 
@@ -500,6 +569,37 @@ def build_search_embed(query: str, answer: str, results: list[dict]) -> discord.
     fontes = "\n".join(f"[{i + 1}] [{r['title'][:80]}]({r['url']})" for i, r in enumerate(results))
     embed.add_field(name=f"Fontes ({len(results)})", value=fontes[:1024], inline=False)
     return embed
+
+
+# Gatilho de busca automatica em chat livre: restrito a variacoes de "pesquis-"
+# (pesquise, pesquisa, pesquisar) de proposito, pra nao disparar em palavras do
+# dia a dia tipo "buscar"/"procurar" e evitar estourar contexto/armazenamento
+# com buscas nao intencionais.
+SEARCH_TRIGGER_RE = re.compile(r"\bpesquis\w*\b", re.IGNORECASE)
+
+
+def wants_web_search(content: str) -> bool:
+    return bool(SEARCH_TRIGGER_RE.search(content))
+
+
+async def auto_search_reply(
+    query: str, author_name: str, author_id: int, channel_id: int
+) -> tuple[str | None, discord.Embed | None]:
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, _web_search_sync, query)
+    if len(results) < SEARCH_MIN_SOURCES:
+        return (
+            f"So encontrei {len(results)} fonte(s) confiavel(is) pra isso, menos do que o "
+            "minimo de 5. Tenta reformular.",
+            None,
+        )
+    answer = await loop.run_in_executor(None, _synthesize_search_sync, query, results)
+    embed = build_search_embed(query, answer, results)
+    # Guarda so a pergunta e um resumo curto na memoria, nao os resultados brutos da
+    # busca - evita inchar o banco e o contexto de conversas futuras nesse canal.
+    await loop.run_in_executor(None, save_message, channel_id, "user", author_name, query)
+    await loop.run_in_executor(None, save_message, channel_id, "assistant", None, answer[:500])
+    return (None, embed)
 
 
 # ---------------- Clima ----------------
@@ -761,7 +861,18 @@ def _collect_category_items(category: dict) -> list[dict]:
     items = []
     for name, url in category["feeds"]:
         items.extend(_fetch_feed_entries(name, url, cutoff))
-    return items[: NEWS_ITEMS_PER_CATEGORY * 2]
+
+    # Descarta noticias que ja foram mostradas recentemente (mesmo link), pra nao
+    # repetir quando /noticias manual e o post automatico caem no mesmo dia.
+    unposted_links = filter_unposted_links([it["link"] for it in items])
+    seen = set()
+    deduped = []
+    for it in items:
+        if it["link"] in unposted_links and it["link"] not in seen:
+            seen.add(it["link"])
+            deduped.append(it)
+
+    return deduped[: NEWS_ITEMS_PER_CATEGORY * 2]
 
 
 NEWS_SUMMARY_PROMPT = """Voce recebeu uma lista de noticias reais (titulo + resumo original, podem estar
@@ -849,6 +960,7 @@ async def build_news_digest() -> list[tuple[dict, list[discord.Embed]]]:
         embeds = [build_item_embed(category, item) for item in curated]
         if embeds:
             sections.append((category, embeds))
+            await loop.run_in_executor(None, mark_news_posted, [it["link"] for it in curated])
     return sections
 
 
@@ -877,7 +989,7 @@ async def post_news_digest(channel: discord.TextChannel):
     for category, embeds in sections:
         await channel.send(f"# {category['label']}")
         try:
-            await channel.send(embeds=embeds)
+            await channel.send(embeds=embeds, view=FeedbackView(category["label"]))
         except discord.HTTPException:
             log.exception("Erro ao enviar embeds da categoria %s", category["label"])
             await channel.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
@@ -926,6 +1038,56 @@ async def rotate_status_task():
 
 @rotate_status_task.before_loop
 async def before_rotate_status_task():
+    await bot.wait_until_ready()
+
+
+# ---------------- Backup automatico do banco ----------------
+
+BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH), "backups")
+BACKUP_RETENTION_DAYS = 7
+BACKUP_TIME = dtime(hour=3, minute=0, tzinfo=NEWS_TIMEZONE)
+
+
+def backup_database_sync():
+    if not os.path.exists(DB_PATH):
+        return
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest_path = os.path.join(BACKUP_DIR, f"solenne-{ts}.db")
+
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(dest_path)
+    try:
+        with dst:
+            src.backup(dst)
+    finally:
+        src.close()
+        dst.close()
+
+    # Limpa backups antigos pra nao encher o disco aos poucos.
+    cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
+    for fname in os.listdir(BACKUP_DIR):
+        path = os.path.join(BACKUP_DIR, fname)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            log.exception("Erro ao limpar backup antigo %s", fname)
+
+    log.info("Backup do banco criado: %s", dest_path)
+
+
+@tasks.loop(time=BACKUP_TIME)
+async def daily_backup_task():
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, backup_database_sync)
+    except Exception:
+        log.exception("Erro ao fazer backup do banco")
+
+
+@daily_backup_task.before_loop
+async def before_daily_backup_task():
     await bot.wait_until_ready()
 
 
@@ -1109,6 +1271,20 @@ async def on_message(message: discord.Message):
         content = message.content
         bot.ambient_last_reply[message.channel.id] = time.monotonic()
 
+    if wants_web_search(content):
+        placeholder = await message.channel.send(
+            embed=thinking_embed(f'🔎 Pesquisando sobre "{content[:100]}"...', eta_seconds=20)
+        )
+        try:
+            text, embed = await auto_search_reply(
+                content, message.author.display_name, message.author.id, message.channel.id
+            )
+        except Exception:
+            log.exception("Erro na busca automatica")
+            text, embed = "Deu ruim pesquisando isso, tenta de novo em instantes.", None
+        await placeholder.edit(content=text, embed=embed, view=FeedbackView(content[:200]))
+        return
+
     placeholder = await message.channel.send(embed=thinking_embed())
     try:
         reply = await ask_hermes(
@@ -1118,7 +1294,7 @@ async def on_message(message: discord.Message):
         log.exception("Erro ao consultar Solenne")
         reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
 
-    await placeholder.edit(content=reply[:1900], embed=None)
+    await placeholder.edit(content=reply[:1900], embed=None, view=FeedbackView(content[:200]))
     for chunk_start in range(1900, len(reply), 1900):
         await message.channel.send(reply[chunk_start:chunk_start + 1900])
 
@@ -1145,7 +1321,9 @@ async def help_cmd(interaction: discord.Interaction):
         name="🔎 Pesquisa",
         value=(
             "`/pesquisa <termo>` — pesquisa na web (minimo 5 fontes reais) e resume com "
-            "os links de onde tirei cada informacao."
+            "os links de onde tirei cada informacao.\n"
+            "Se voce falar \"pesquise\"/\"pesquisa\" mencionando ou no modo ambiente, eu "
+            "busco na web automaticamente em vez de responder de memoria."
         ),
         inline=False,
     )
@@ -1200,7 +1378,9 @@ async def ask(interaction: discord.Interaction, pergunta: str):
     except Exception:
         log.exception("Erro ao consultar Solenne")
         reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
-    await interaction.edit_original_response(content=reply[:1900], embed=None)
+    await interaction.edit_original_response(
+        content=reply[:1900], embed=None, view=FeedbackView(pergunta[:200])
+    )
     for chunk_start in range(1900, len(reply), 1900):
         await interaction.followup.send(reply[chunk_start:chunk_start + 1900])
 
@@ -1236,7 +1416,7 @@ async def pesquisa(interaction: discord.Interaction, termo: str):
         return
 
     embed = build_search_embed(termo, answer, results)
-    await interaction.edit_original_response(content=None, embed=embed)
+    await interaction.edit_original_response(content=None, embed=embed, view=FeedbackView(termo))
 
 
 # ---------------- Slash commands: clima ----------------
@@ -1289,7 +1469,7 @@ async def noticias(interaction: discord.Interaction):
     for category, embeds in sections:
         await interaction.followup.send(f"# {category['label']}")
         try:
-            await interaction.followup.send(embeds=embeds)
+            await interaction.followup.send(embeds=embeds, view=FeedbackView(category["label"]))
         except discord.HTTPException:
             log.exception("Erro ao enviar embeds da categoria %s", category["label"])
             await interaction.followup.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
