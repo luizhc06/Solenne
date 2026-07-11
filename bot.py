@@ -1560,7 +1560,11 @@ async def perturbar(
                 comeback = await loop.run_in_executor(
                     None, _perturbar_comeback_sync, reply_msg.content, usuario.display_name
                 )
-            await channel.send(comeback)
+            if not comeback or not comeback.strip():
+                # A IA as vezes recusa/esvazia a resposta (ex: reply com palavrao
+                # pesado) - cai numa fala pronta em vez de nao mandar nada.
+                comeback = random.choice(PERTURBAR_LINHAS).format(mention=usuario.mention)
+            await channel.send(comeback.strip())
         except Exception:
             log.exception("Erro ao gerar resposta do /perturbar")
 
