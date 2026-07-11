@@ -1507,6 +1507,17 @@ PERTURBAR_LINHAS = [
     "so passando pra perturbar {mention} mesmo",
 ]
 
+PERTURBAR_COMEBACK_PROMPT = """Voce e Solenne e esta de brincadeira perturbando {nome} no chat do
+Discord (tipo encher o saco de leve, sem ofender). {nome} acabou de responder: "{resposta}"
+
+Escreva UMA linha curta, engracada e na hora, continuando a brincadeira de forma leve a partir
+dessa resposta - sem ser ofensiva, sem sair do personagem. Responda somente com essa linha."""
+
+
+def _perturbar_comeback_sync(resposta: str, nome: str) -> str:
+    prompt = PERTURBAR_COMEBACK_PROMPT.format(nome=nome, resposta=resposta[:300])
+    return _complete([{"role": "user", "content": prompt}], temperature=0.9, max_tokens=100)
+
 
 @bot.tree.command(
     name="perturbar",
@@ -1532,10 +1543,26 @@ async def perturbar(
         f"Combinado, vou perturbar {usuario.mention} {vezes}x aqui no canal 😈", ephemeral=True
     )
     channel = interaction.channel
+    loop = asyncio.get_event_loop()
     linhas = random.sample(PERTURBAR_LINHAS, min(vezes, len(PERTURBAR_LINHAS)))
+
+    def is_reply_from_target(m: discord.Message) -> bool:
+        return m.channel.id == channel.id and m.author.id == usuario.id
+
     for linha in linhas:
         await channel.send(linha.format(mention=usuario.mention))
-        await asyncio.sleep(intervalo)
+        try:
+            reply_msg = await bot.wait_for("message", timeout=intervalo, check=is_reply_from_target)
+        except asyncio.TimeoutError:
+            continue
+        try:
+            async with bot.ai_lock:
+                comeback = await loop.run_in_executor(
+                    None, _perturbar_comeback_sync, reply_msg.content, usuario.display_name
+                )
+            await channel.send(comeback)
+        except Exception:
+            log.exception("Erro ao gerar resposta do /perturbar")
 
 
 # ---------------- Slash commands: admin (somente dono) ----------------
