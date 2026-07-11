@@ -445,15 +445,22 @@ async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id
         profile = await loop.run_in_executor(None, get_user_summary, author_id)
 
         pergunta_atual = (
-            f"Mensagem atual, de {author_name}, e a que voce deve responder agora: {user_msg}"
+            f"Mensagem atual, de {author_name} (ID Discord: {author_id}), "
+            f"e a que voce deve responder agora: {user_msg}"
         )
         agora = datetime.now(NEWS_TIMEZONE)
         dia_semana_pt = DIAS_SEMANA[agora.weekday()]
+        eh_dono = author_id == OWNER_USER_ID
         system_content = (
             SYSTEM_PROMPT
             + f"\n\nData e hora atual: {dia_semana_pt}, {agora.strftime('%d/%m/%Y %H:%M')} "
             f"(horario de Brasilia). Use isso se precisar saber que dia/hora e agora, "
             f"nunca invente ou chute uma data."
+            + f"\n\nO ID Discord do seu dono/criador (Rizu) e {OWNER_USER_ID}. A mensagem atual "
+            + ("VEIO do dono de verdade (o ID bate)." if eh_dono else "NAO veio do dono (o ID nao bate com o do dono).")
+            + " Use isso pra responder com certeza sobre quem e o dono, em vez de dizer que "
+            + "nao reconhece ou de chutar - voce SEMPRE sabe se quem esta falando e o dono ou nao, "
+            + "porque o ID vem no proprio contexto da mensagem."
         )
         if profile:
             system_content += f"\n\nO que voce ja sabe sobre {author_name}:\n{profile}"
