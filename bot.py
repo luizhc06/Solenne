@@ -351,7 +351,8 @@ def _complete(messages: list[dict], temperature: float) -> str:
         temperature=temperature,
         max_tokens=800,
     )
-    return completion.choices[0].message.content
+    # A API as vezes retorna content=None (sem levantar erro) em vez de string vazia.
+    return completion.choices[0].message.content or ""
 
 
 def _think_and_answer(base_messages: list[dict]) -> str:
