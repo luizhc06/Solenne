@@ -374,13 +374,14 @@ THINKING_GIF_URL = "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif"
 THINKING_ETA_SECONDS = 20
 
 
-def thinking_embed() -> discord.Embed:
-    embed = discord.Embed(
-        description=f"🧠 Pensando... (resposta em ~{THINKING_ETA_SECONDS}s)",
-        color=discord.Color.blurple(),
-    )
+def thinking_embed(text: str | None = None, eta_seconds: int = THINKING_ETA_SECONDS) -> discord.Embed:
+    description = text or f"🧠 Pensando... (resposta em ~{eta_seconds}s)"
+    embed = discord.Embed(description=description, color=discord.Color.blurple())
     embed.set_thumbnail(url=THINKING_GIF_URL)
     return embed
+
+
+NEWS_THINKING_ETA_SECONDS = 40
 
 
 # ---------------- Noticias diarias ----------------
@@ -578,12 +579,20 @@ def find_news_channel(guild: discord.Guild) -> discord.TextChannel | None:
 
 
 async def post_news_digest(channel: discord.TextChannel):
+    placeholder = await channel.send(
+        embed=thinking_embed(
+            "📰 Buscando e resumindo as noticias do dia...", eta_seconds=NEWS_THINKING_ETA_SECONDS
+        )
+    )
     sections = await build_news_digest()
     if not sections:
-        await channel.send("Nao encontrei noticias relevantes nas ultimas horas, tento de novo mais tarde.")
+        await placeholder.edit(
+            content="Nao encontrei noticias relevantes nas ultimas horas, tento de novo mais tarde.",
+            embed=None,
+        )
         return
     today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
-    await channel.send(f"📰 **Resumo de noticias — {today}**")
+    await placeholder.edit(content=f"📰 **Resumo de noticias — {today}**", embed=None)
     for category, embeds in sections:
         await channel.send(f"**━━━ {category['label']} ━━━**")
         await channel.send(embeds=embeds)
@@ -861,13 +870,19 @@ async def ask(interaction: discord.Interaction, pergunta: str):
 
 @bot.tree.command(name="noticias", description="Manda um resumo de noticias agora")
 async def noticias(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await interaction.response.send_message(
+        embed=thinking_embed(
+            "📰 Buscando e resumindo as noticias...", eta_seconds=NEWS_THINKING_ETA_SECONDS
+        )
+    )
     sections = await build_news_digest()
     if not sections:
-        await interaction.followup.send("Nao encontrei noticias relevantes nas ultimas horas.")
+        await interaction.edit_original_response(
+            content="Nao encontrei noticias relevantes nas ultimas horas.", embed=None
+        )
         return
     today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
-    await interaction.followup.send(f"📰 **Resumo de noticias — {today}**")
+    await interaction.edit_original_response(content=f"📰 **Resumo de noticias — {today}**", embed=None)
     for category, embeds in sections:
         await interaction.followup.send(f"**━━━ {category['label']} ━━━**")
         await interaction.followup.send(embeds=embeds)
