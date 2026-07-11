@@ -1515,13 +1515,13 @@ PERTURBAR_LINHAS = [
 @owner_only()
 @app_commands.describe(
     usuario="Quem vai ser perturbado",
-    vezes="Quantas mensagens (1-6, padrao 3)",
+    vezes="Quantas mensagens (1-10, padrao 3)",
     intervalo="Segundos entre cada mensagem (10-120, padrao 20)",
 )
 async def perturbar(
     interaction: discord.Interaction,
     usuario: discord.Member,
-    vezes: app_commands.Range[int, 1, 6] = 3,
+    vezes: app_commands.Range[int, 1, 10] = 3,
     intervalo: app_commands.Range[int, 10, 120] = 20,
 ):
     if usuario.bot:
