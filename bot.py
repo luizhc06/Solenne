@@ -4,11 +4,14 @@ import time
 import sqlite3
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dtime
+from zoneinfo import ZoneInfo
 from collections import defaultdict, deque
 
 import discord
+import feedparser
 from discord import app_commands
+from discord.ext import tasks
 from openai import OpenAI
 
 logging.basicConfig(level=logging.INFO)
@@ -61,7 +64,7 @@ Tom e formato:
 - Nunca responda so com "depende, cada um e unico" - quando apropriado, escolha um lado e explique por que.
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
-- Comandos que voce realmente tem: /help, /ask, /kick, /addrole, /removerole, /criarcanal,
+- Comandos que voce realmente tem: /help, /ask, /noticias, /kick, /addrole, /removerole, /criarcanal,
   /apagarcanal, /lock, /unlock.
 - Voce NAO tem: previsao do tempo, lembretes/agenda, busca na Wikipedia, calculadora,
   nem qualquer outro comando que nao esteja na lista acima.
@@ -113,12 +116,14 @@ class HermesBot(discord.Client):
         self.msg_log: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
         self.recently_punished: dict[tuple[int, int], float] = {}
         self.ambient_last_reply: dict[int, float] = {}
+        self.ai_lock = asyncio.Lock()
 
     async def setup_hook(self):
         init_db()
         guild = discord.Object(id=ALLOWED_GUILD_ID)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
+        daily_news_task.start()
 
 
 bot = HermesBot()
@@ -325,33 +330,277 @@ def _think_and_answer(base_messages: list[dict]) -> str:
     return _complete(final_messages, temperature=0.75)
 
 
+# Uma resposta de cada vez em todo o bot - evita respostas se atropelando quando
+# varias pessoas usam comandos ao mesmo tempo.
 async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id: int) -> str:
+    async with bot.ai_lock:
+        loop = asyncio.get_event_loop()
+
+        history = await loop.run_in_executor(None, load_recent_history, channel_id)
+        profile = await loop.run_in_executor(None, get_user_summary, author_id)
+
+        pergunta_atual = (
+            f"Mensagem atual, de {author_name}, e a que voce deve responder agora: {user_msg}"
+        )
+        system_content = SYSTEM_PROMPT
+        if profile:
+            system_content += f"\n\nO que voce ja sabe sobre {author_name}:\n{profile}"
+
+        base_messages = (
+            [{"role": "system", "content": system_content}]
+            + history
+            + [{"role": "user", "content": pergunta_atual}]
+        )
+
+        reply = await loop.run_in_executor(None, _think_and_answer, base_messages)
+
+        await loop.run_in_executor(None, save_message, channel_id, "user", author_name, user_msg)
+        await loop.run_in_executor(None, save_message, channel_id, "assistant", None, reply)
+
+        asyncio.create_task(update_profile(author_id, author_name, user_msg))
+
+        return reply
+
+
+# ---------------- Indicador de "pensando" ----------------
+
+THINKING_GIF_URL = "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif"
+THINKING_ETA_SECONDS = 20
+
+
+def thinking_embed() -> discord.Embed:
+    embed = discord.Embed(
+        description=f"🧠 Pensando... (resposta em ~{THINKING_ETA_SECONDS}s)",
+        color=discord.Color.blurple(),
+    )
+    embed.set_thumbnail(url=THINKING_GIF_URL)
+    return embed
+
+
+# ---------------- Noticias diarias ----------------
+
+NEWS_CHANNEL_NAME = "noticias"
+NEWS_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+NEWS_POST_TIME = dtime(hour=12, minute=0, tzinfo=NEWS_TIMEZONE)
+NEWS_LOOKBACK_HOURS = 30
+NEWS_ITEMS_PER_CATEGORY = 4
+
+NEWS_CATEGORIES = {
+    "geek": {
+        "label": "🕹️ Geek & Tecnologia",
+        "color": discord.Color.blue(),
+        "feeds": [
+            ("The Verge", "https://www.theverge.com/rss/index.xml"),
+            ("Ars Technica", "https://feeds.arstechnica.com/arstechnica/index"),
+        ],
+    },
+    "ciencia": {
+        "label": "🔬 Ciencia",
+        "color": discord.Color.green(),
+        "feeds": [
+            ("ScienceDaily", "https://www.sciencedaily.com/rss/all.xml"),
+            ("Nature News", "https://www.nature.com/nature.rss"),
+        ],
+    },
+    "ia": {
+        "label": "🤖 Inteligencia Artificial",
+        "color": discord.Color.purple(),
+        "feeds": [
+            ("MIT Technology Review", "https://www.technologyreview.com/feed/"),
+            ("VentureBeat AI", "https://venturebeat.com/category/ai/feed/"),
+        ],
+    },
+    "brasil": {
+        "label": "🇧🇷 Brasil",
+        "color": discord.Color.gold(),
+        "feeds": [
+            ("G1 Brasil", "https://g1.globo.com/dynamo/brasil/rss2.xml"),
+            ("G1 Politica", "https://g1.globo.com/dynamo/politica/rss2.xml"),
+        ],
+    },
+    "mundo": {
+        "label": "🌍 Mundo, Guerras & Governos",
+        "color": discord.Color.red(),
+        "feeds": [
+            ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml"),
+            ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+        ],
+    },
+}
+
+TAG_RE = re.compile(r"<[^<]+?>")
+IMG_SRC_RE = re.compile(r'<img[^>]+src="([^"]+)"')
+
+
+def _extract_image(entry) -> str | None:
+    media_thumb = entry.get("media_thumbnail")
+    if media_thumb:
+        return media_thumb[0].get("url")
+    media_content = entry.get("media_content")
+    if media_content:
+        for m in media_content:
+            if m.get("url"):
+                return m["url"]
+    for link in entry.get("links", []):
+        if str(link.get("type", "")).startswith("image/"):
+            return link.get("href")
+    raw_html = entry.get("summary", "") + entry.get("description", "")
+    match = IMG_SRC_RE.search(raw_html)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _fetch_feed_entries(name: str, url: str, cutoff: datetime) -> list[dict]:
+    entries = []
+    try:
+        parsed = feedparser.parse(url)
+    except Exception:
+        log.exception("Erro ao buscar feed %s", name)
+        return entries
+
+    for entry in parsed.entries[:10]:
+        published = entry.get("published_parsed") or entry.get("updated_parsed")
+        if published:
+            published_dt = datetime(*published[:6], tzinfo=timezone.utc)
+            if published_dt < cutoff:
+                continue
+        summary = TAG_RE.sub("", entry.get("summary", ""))[:300]
+        link = entry.get("link", "")
+        if not link:
+            continue
+        entries.append(
+            {
+                "title": entry.get("title", "Sem titulo"),
+                "link": link,
+                "summary": summary,
+                "source": name,
+                "image": _extract_image(entry),
+            }
+        )
+    return entries
+
+
+def _collect_category_items(category: dict) -> list[dict]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=NEWS_LOOKBACK_HOURS)
+    items = []
+    for name, url in category["feeds"]:
+        items.extend(_fetch_feed_entries(name, url, cutoff))
+    return items[: NEWS_ITEMS_PER_CATEGORY * 2]
+
+
+NEWS_SUMMARY_PROMPT = """Voce recebeu uma lista de noticias reais (titulo + resumo original, podem estar
+em ingles) de uma categoria. Escolha as {n} mais relevantes e importantes. Para cada uma, traduza o
+titulo para portugues (mantendo o sentido, sem inventar) e escreva um resumo curto em portugues (1-2
+frases, direto, sem floreio, sem opiniao). Nao invente nada que nao esteja no texto original - se um
+resumo original for vago, mantenha vago. Se o titulo/resumo original ja estiver em portugues, so
+mantenha ou ajuste levemente. Responda EXATAMENTE nesse formato, uma linha por noticia escolhida, na
+ordem de importancia, usando " ||| " como separador:
+
+INDICE ||| titulo traduzido para portugues ||| resumo em portugues
+
+Onde INDICE e o numero do item na lista abaixo (comecando em 0). Nao inclua mais nada alem dessas linhas,
+sem numeracao extra, sem comentarios.
+
+Noticias:
+{items_text}"""
+
+
+def _summarize_category_sync(items: list[dict]) -> list[dict]:
+    if not items:
+        return []
+    items_text = "\n".join(
+        f"{i}. [{it['source']}] {it['title']} - {it['summary']}" for i, it in enumerate(items)
+    )
+    prompt = NEWS_SUMMARY_PROMPT.format(n=min(NEWS_ITEMS_PER_CATEGORY, len(items)), items_text=items_text)
+    try:
+        raw = _complete([{"role": "user", "content": prompt}], temperature=0.4)
+    except Exception:
+        log.exception("Erro ao resumir noticias")
+        return items[:NEWS_ITEMS_PER_CATEGORY]
+
+    picked = []
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        parts = line.split("|||")
+        if len(parts) != 3:
+            continue
+        idx_str, titulo_pt, resumo_pt = (p.strip() for p in parts)
+        if not idx_str.isdigit():
+            continue
+        idx = int(idx_str)
+        if 0 <= idx < len(items):
+            item = dict(items[idx])
+            item["title_pt"] = titulo_pt or item["title"]
+            item["summary_pt"] = resumo_pt or item["summary"]
+            picked.append(item)
+    return picked[:NEWS_ITEMS_PER_CATEGORY] if picked else items[:NEWS_ITEMS_PER_CATEGORY]
+
+
+def build_item_embed(category: dict, item: dict) -> discord.Embed:
+    titulo = item.get("title_pt") or item["title"]
+    resumo = item.get("summary_pt") or item["summary"] or "(sem resumo disponivel)"
+    embed = discord.Embed(
+        title=titulo[:250],
+        description=resumo[:400],
+        url=item["link"],
+        color=category["color"],
+    )
+    embed.set_footer(text=f"Fonte: {item['source']}")
+    if item.get("image"):
+        embed.set_image(url=item["image"])
+    return embed
+
+
+async def build_news_digest() -> list[tuple[dict, list[discord.Embed]]]:
     loop = asyncio.get_event_loop()
+    sections = []
+    for category in NEWS_CATEGORIES.values():
+        raw_items = await loop.run_in_executor(None, _collect_category_items, category)
+        curated = await loop.run_in_executor(None, _summarize_category_sync, raw_items)
+        embeds = [build_item_embed(category, item) for item in curated]
+        if embeds:
+            sections.append((category, embeds))
+    return sections
 
-    history = await loop.run_in_executor(None, load_recent_history, channel_id)
-    profile = await loop.run_in_executor(None, get_user_summary, author_id)
 
-    pergunta_atual = (
-        f"Mensagem atual, de {author_name}, e a que voce deve responder agora: {user_msg}"
-    )
-    system_content = SYSTEM_PROMPT
-    if profile:
-        system_content += f"\n\nO que voce ja sabe sobre {author_name}:\n{profile}"
+def find_news_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    for channel in guild.text_channels:
+        if NEWS_CHANNEL_NAME in channel.name.lower():
+            return channel
+    return None
 
-    base_messages = (
-        [{"role": "system", "content": system_content}]
-        + history
-        + [{"role": "user", "content": pergunta_atual}]
-    )
 
-    reply = await loop.run_in_executor(None, _think_and_answer, base_messages)
+async def post_news_digest(channel: discord.TextChannel):
+    sections = await build_news_digest()
+    if not sections:
+        await channel.send("Nao encontrei noticias relevantes nas ultimas horas, tento de novo mais tarde.")
+        return
+    today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
+    await channel.send(f"📰 **Resumo de noticias — {today}**")
+    for category, embeds in sections:
+        await channel.send(f"**━━━ {category['label']} ━━━**")
+        await channel.send(embeds=embeds)
 
-    await loop.run_in_executor(None, save_message, channel_id, "user", author_name, user_msg)
-    await loop.run_in_executor(None, save_message, channel_id, "assistant", None, reply)
 
-    asyncio.create_task(update_profile(author_id, author_name, user_msg))
+@tasks.loop(time=NEWS_POST_TIME)
+async def daily_news_task():
+    guild = bot.get_guild(ALLOWED_GUILD_ID)
+    if guild is None:
+        return
+    channel = find_news_channel(guild)
+    if channel is None:
+        log.warning("Canal de noticias nao encontrado (procurando por '%s' no nome).", NEWS_CHANNEL_NAME)
+        return
+    try:
+        await post_news_digest(channel)
+    except Exception:
+        log.exception("Erro ao postar resumo diario de noticias")
 
-    return reply
+
+@daily_news_task.before_loop
+async def before_daily_news_task():
+    await bot.wait_until_ready()
 
 
 # ---------------- Anti-flood / automod ----------------
@@ -523,16 +772,17 @@ async def on_message(message: discord.Message):
         content = message.content
         bot.ambient_last_reply[message.channel.id] = time.monotonic()
 
-    async with message.channel.typing():
-        try:
-            reply = await ask_hermes(
-                message.channel.id, content, message.author.display_name, message.author.id
-            )
-        except Exception:
-            log.exception("Erro ao consultar Hermes")
-            reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
+    placeholder = await message.channel.send(embed=thinking_embed())
+    try:
+        reply = await ask_hermes(
+            message.channel.id, content, message.author.display_name, message.author.id
+        )
+    except Exception:
+        log.exception("Erro ao consultar Hermes")
+        reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
 
-    for chunk_start in range(0, len(reply), 1900):
+    await placeholder.edit(content=reply[:1900], embed=None)
+    for chunk_start in range(1900, len(reply), 1900):
         await message.channel.send(reply[chunk_start:chunk_start + 1900])
 
 
@@ -551,6 +801,15 @@ async def help_cmd(interaction: discord.Interaction):
             "`/ask <pergunta>` — pergunta algo\n"
             "`@Solenne <mensagem>` — mesma coisa, mencionando\n"
             "Nos canais geral, comidas, bot e videojogos-geral eu tambem respondo perguntas sozinha."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📰 Noticias",
+        value=(
+            "`/noticias` — resumo agora, com cards por assunto (Geek, Ciencia, IA, Brasil, Mundo)\n"
+            "Todo dia ao meio-dia eu posto automaticamente em #noticias. "
+            "So uso fontes reais (RSS de veiculos conhecidos) e sempre linko a fonte original."
         ),
         inline=False,
     )
@@ -579,7 +838,7 @@ async def help_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="ask", description="Pergunte algo ao Hermes")
 @app_commands.describe(pergunta="O que voce quer perguntar")
 async def ask(interaction: discord.Interaction, pergunta: str):
-    await interaction.response.defer(thinking=True)
+    await interaction.response.send_message(embed=thinking_embed())
     try:
         reply = await ask_hermes(
             interaction.channel_id, pergunta, interaction.user.display_name, interaction.user.id
@@ -587,8 +846,25 @@ async def ask(interaction: discord.Interaction, pergunta: str):
     except Exception:
         log.exception("Erro ao consultar Hermes")
         reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
-    for chunk_start in range(0, len(reply), 1900):
+    await interaction.edit_original_response(content=reply[:1900], embed=None)
+    for chunk_start in range(1900, len(reply), 1900):
         await interaction.followup.send(reply[chunk_start:chunk_start + 1900])
+
+
+# ---------------- Slash commands: noticias ----------------
+
+@bot.tree.command(name="noticias", description="Manda um resumo de noticias agora")
+async def noticias(interaction: discord.Interaction):
+    await interaction.response.defer()
+    sections = await build_news_digest()
+    if not sections:
+        await interaction.followup.send("Nao encontrei noticias relevantes nas ultimas horas.")
+        return
+    today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
+    await interaction.followup.send(f"📰 **Resumo de noticias — {today}**")
+    for category, embeds in sections:
+        await interaction.followup.send(f"**━━━ {category['label']} ━━━**")
+        await interaction.followup.send(embeds=embeds)
 
 
 # ---------------- Slash commands: admin (somente dono) ----------------
