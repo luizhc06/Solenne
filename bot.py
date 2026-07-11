@@ -344,12 +344,12 @@ HUMANIZE_PROMPT = (
 )
 
 
-def _complete(messages: list[dict], temperature: float) -> str:
+def _complete(messages: list[dict], temperature: float, max_tokens: int = 800) -> str:
     completion = client_ai.chat.completions.create(
         model=MODEL,
         messages=messages,
         temperature=temperature,
-        max_tokens=800,
+        max_tokens=max_tokens,
     )
     # A API as vezes retorna content=None (sem levantar erro) em vez de string vazia.
     return completion.choices[0].message.content or ""
@@ -788,28 +788,43 @@ def _summarize_category_sync(items: list[dict]) -> list[dict]:
         f"{i}. [{it['source']}] {it['title']} - {it['summary']}" for i, it in enumerate(items)
     )
     prompt = NEWS_SUMMARY_PROMPT.format(n=min(NEWS_ITEMS_PER_CATEGORY, len(items)), items_text=items_text)
-    try:
-        raw = _complete([{"role": "user", "content": prompt}], temperature=0.4)
-    except Exception:
-        log.exception("Erro ao resumir noticias")
-        return items[:NEWS_ITEMS_PER_CATEGORY]
 
-    picked = []
-    for line in raw.strip().splitlines():
-        line = line.strip()
-        parts = line.split("|||")
-        if len(parts) != 3:
-            continue
-        idx_str, titulo_pt, resumo_pt = (p.strip() for p in parts)
-        if not idx_str.isdigit():
-            continue
-        idx = int(idx_str)
-        if 0 <= idx < len(items):
-            item = dict(items[idx])
-            item["title_pt"] = titulo_pt or item["title"]
-            item["summary_pt"] = resumo_pt or item["summary"]
-            picked.append(item)
-    return picked[:NEWS_ITEMS_PER_CATEGORY] if picked else items[:NEWS_ITEMS_PER_CATEGORY]
+    def _try_once() -> list[dict]:
+        # max_tokens generoso: 4 itens com titulo+resumo traduzidos podem passar
+        # facil de 800 tokens e ficar cortados no meio (resumo quebrado tipo "O").
+        raw = _complete([{"role": "user", "content": prompt}], temperature=0.4, max_tokens=1800)
+        picked = []
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            parts = line.split("|||")
+            if len(parts) != 3:
+                continue
+            idx_str, titulo_pt, resumo_pt = (p.strip() for p in parts)
+            if not idx_str.isdigit():
+                continue
+            # Resumo suspeito demais curto costuma ser resposta cortada no meio -
+            # melhor descartar esse item do que mostrar algo quebrado tipo "O".
+            if len(resumo_pt) < 15:
+                continue
+            idx = int(idx_str)
+            if 0 <= idx < len(items):
+                item = dict(items[idx])
+                item["title_pt"] = titulo_pt or item["title"]
+                item["summary_pt"] = resumo_pt or item["summary"]
+                picked.append(item)
+        return picked
+
+    for attempt in range(2):
+        try:
+            picked = _try_once()
+        except Exception:
+            log.exception("Erro ao resumir noticias (tentativa %s)", attempt + 1)
+            picked = []
+        if picked:
+            return picked[:NEWS_ITEMS_PER_CATEGORY]
+
+    log.warning("Resumo de noticias falhou 2x, mostrando itens sem traducao")
+    return items[:NEWS_ITEMS_PER_CATEGORY]
 
 
 def build_item_embed(category: dict, item: dict) -> discord.Embed:
@@ -860,7 +875,7 @@ async def post_news_digest(channel: discord.TextChannel):
     today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
     await placeholder.edit(content=f"📰 **Resumo de noticias — {today}**", embed=None)
     for category, embeds in sections:
-        await channel.send(f"**━━━ {category['label']} ━━━**")
+        await channel.send(f"# {category['label']}")
         try:
             await channel.send(embeds=embeds)
         except discord.HTTPException:
@@ -1272,7 +1287,7 @@ async def noticias(interaction: discord.Interaction):
     today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
     await interaction.edit_original_response(content=f"📰 **Resumo de noticias — {today}**", embed=None)
     for category, embeds in sections:
-        await interaction.followup.send(f"**━━━ {category['label']} ━━━**")
+        await interaction.followup.send(f"# {category['label']}")
         try:
             await interaction.followup.send(embeds=embeds)
         except discord.HTTPException:
