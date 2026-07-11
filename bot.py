@@ -964,6 +964,35 @@ def build_item_embed(category: dict, item: dict) -> discord.Embed:
     return embed
 
 
+NEWS_INTRO_PROMPT = """Escreva UMA linha curta de abertura, com a sua personalidade (direta, sem
+bajulacao, pode ter humor leve), pra introduzir o resumo diario de noticias que voce vai postar agora.
+Nao inclua data nem as palavras "resumo" ou "noticias" no texto - so a frase de abertura em si. Varie o
+estilo, evite soar generica ou repetitiva. Responda somente com essa linha, sem aspas."""
+
+NEWS_INTRO_FALLBACKS = [
+    "Vamo que vamo, direto ao ponto.",
+    "Separei o que importou de verdade hoje.",
+    "Nada de enrolacao, so o essencial.",
+    "Bora ver no que o mundo se meteu hoje.",
+]
+
+
+def _news_intro_sync() -> str:
+    try:
+        intro = _complete([{"role": "user", "content": NEWS_INTRO_PROMPT}], temperature=0.9, max_tokens=60)
+    except Exception:
+        log.exception("Erro ao gerar introducao das noticias")
+        return random.choice(NEWS_INTRO_FALLBACKS)
+    intro = intro.strip().strip('"')
+    return intro or random.choice(NEWS_INTRO_FALLBACKS)
+
+
+async def build_news_intro() -> str:
+    loop = asyncio.get_event_loop()
+    async with bot.ai_lock:
+        return await loop.run_in_executor(None, _news_intro_sync)
+
+
 async def build_news_digest() -> list[tuple[dict, list[discord.Embed]]]:
     loop = asyncio.get_event_loop()
     sections = []
@@ -998,7 +1027,10 @@ async def post_news_digest(channel: discord.TextChannel):
         )
         return
     today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
-    await placeholder.edit(content=f"📰 **Resumo de noticias — {today}**", embed=None)
+    intro = await build_news_intro()
+    await placeholder.edit(
+        content=f"📰 **{intro}**\n*Resumo de noticias — {today}*", embed=None
+    )
     for category, embeds in sections:
         await channel.send(f"# {category['label']}")
         try:
@@ -1479,7 +1511,10 @@ async def noticias(interaction: discord.Interaction):
         )
         return
     today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
-    await interaction.edit_original_response(content=f"📰 **Resumo de noticias — {today}**", embed=None)
+    intro = await build_news_intro()
+    await interaction.edit_original_response(
+        content=f"📰 **{intro}**\n*Resumo de noticias — {today}*", embed=None
+    )
     for category, embeds in sections:
         await interaction.followup.send(f"# {category['label']}")
         try:
