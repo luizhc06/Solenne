@@ -29,18 +29,27 @@ motor de inferencia e discord.py para integracao com o Discord.
   quando varias pessoas usam comandos ao mesmo tempo.
 - Indicador de "pensando" (embed com GIF e estimativa de tempo) enquanto gera a resposta.
 - Nunca responde mensagens recebidas em DM.
+- Sabe a data/hora atual (Brasilia) em todo pedido, pra nao "alucinar" datas/dias da semana.
+- Botoes de feedback (👍/👎) em respostas de chat, pesquisa e noticias, que alimentam o
+  resumo de perfil da pessoa que clicou.
 
 ### Pesquisa
 - `/pesquisa <termo>`: busca real na web (minimo 5 fontes via DuckDuckGo), resume com a IA
   citando `[1] [2]` etc. e sempre anexa os links reais das fontes usadas.
+- Gatilho automatico em chat livre: falar "pesquise"/"pesquisa" mencionando o bot ou no
+  modo ambiente dispara essa mesma busca em vez de responder de memoria. Restrito de
+  proposito a variacoes de "pesquis-" (nao "buscar"/"procurar", de uso comum do dia a dia)
+  pra nao disparar buscas sem querer.
 
 ### Noticias
 - `/noticias`: resumo sob demanda, ou automatico todo dia ao meio-dia (horario de Brasilia)
-  em um canal com "noticias" no nome.
+  em um canal com "noticias" no nome. Divisorias por categoria usam heading (`#`) do Discord.
 - Fontes reais via RSS (nunca inventadas): Geek/Tecnologia, Ciencia, Inteligencia Artificial,
   Brasil (G1) e Mundo/Geopolitica (BBC, Al Jazeera).
 - Titulo e resumo traduzidos/resumidos para PT-BR pela IA a partir do texto real do feed,
   com link da fonte original sempre presente.
+- **Deduplicacao**: noticias ja mostradas nos ultimos 2 dias nao repetem entre o post
+  automatico e execucoes manuais do `/noticias`.
 
 ### Clima
 - `/clima <cidade>`: temperatura atual, sensacao termica, umidade e previsao dos proximos
@@ -64,6 +73,12 @@ motor de inferencia e discord.py para integracao com o Discord.
 ### Status
 - O status/atividade do bot roda a cada 30 minutos entre frases como "Fazendo automod",
   "Pesquisando clima", "Investigando noticias", etc.
+
+### Infraestrutura e confiabilidade
+- **Backup diario** do banco SQLite (3h da manha, horario de Brasilia), com retencao de
+  7 dias e limpeza automatica dos backups mais antigos (nao enche o disco com o tempo).
+- **Limite de memoria no Docker** (700MB) pra nao arriscar travar a VM inteira (1GB total)
+  se algum processo vazar memoria.
 
 ## Variaveis de ambiente
 
