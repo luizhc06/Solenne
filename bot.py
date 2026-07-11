@@ -4,10 +4,12 @@ import time
 import sqlite3
 import asyncio
 import logging
+import unicodedata
 from datetime import datetime, timedelta, timezone, time as dtime
 from zoneinfo import ZoneInfo
 from collections import defaultdict, deque
 
+import httpx
 import discord
 import feedparser
 from discord import app_commands
@@ -64,14 +66,16 @@ Tom e formato:
 - Nunca responda so com "depende, cada um e unico" - quando apropriado, escolha um lado e explique por que.
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
-- Comandos que voce realmente tem: /help, /ask, /noticias, /kick, /addrole, /removerole, /criarcanal,
-  /apagarcanal, /lock, /unlock.
-- Voce NAO tem: previsao do tempo, lembretes/agenda, busca na Wikipedia, calculadora,
-  nem qualquer outro comando que nao esteja na lista acima.
+- Comandos que voce realmente tem: /help, /ask, /noticias, /clima, /kick, /addrole, /removerole,
+  /criarcanal, /apagarcanal, /lock, /unlock.
+- /clima mostra o clima atual (real, via Open-Meteo) e alertas oficiais de Defesa Civil/INMET.
+- Voce NAO tem: lembretes/agenda, busca na Wikipedia, calculadora, nem qualquer outro
+  comando que nao esteja na lista acima.
 - Se alguem perguntar sobre seus comandos, liste APENAS os reais (ou sugira usar /help).
-- Se alguem pedir algo que voce nao sabe fazer de verdade (previsao do tempo em tempo
-  real, noticias ao vivo, lembretes, etc.), diga claramente que ainda nao tem essa
-  funcionalidade. Nunca finja ter uma capacidade que nao existe nem responda com
+- Se alguem pedir algo que voce nao sabe fazer de verdade (lembretes, calculadora,
+  busca na Wikipedia, etc. - fora da lista de comandos acima), diga claramente que
+  ainda nao tem essa funcionalidade. Para clima, sempre sugira usar /clima em vez
+  de responder de cabeca. Nunca finja ter uma capacidade que nao existe nem responda com
   informacao inventada se passando por dado real (tipo previsao do tempo "generica").
 """
 
@@ -382,6 +386,177 @@ def thinking_embed(text: str | None = None, eta_seconds: int = THINKING_ETA_SECO
 
 
 NEWS_THINKING_ETA_SECONDS = 40
+
+
+# ---------------- Clima ----------------
+
+WEATHER_CODE_MAP = {
+    0: ("☀️", "Ceu limpo"),
+    1: ("🌤️", "Poucas nuvens"),
+    2: ("⛅", "Parcialmente nublado"),
+    3: ("☁️", "Nublado"),
+    45: ("🌫️", "Nevoeiro"),
+    48: ("🌫️", "Nevoeiro com geada"),
+    51: ("🌦️", "Garoa fraca"),
+    53: ("🌦️", "Garoa"),
+    55: ("🌦️", "Garoa forte"),
+    61: ("🌧️", "Chuva fraca"),
+    63: ("🌧️", "Chuva"),
+    65: ("🌧️", "Chuva forte"),
+    71: ("❄️", "Neve fraca"),
+    73: ("❄️", "Neve"),
+    75: ("❄️", "Neve forte"),
+    80: ("🌦️", "Pancadas de chuva fracas"),
+    81: ("🌦️", "Pancadas de chuva"),
+    82: ("⛈️", "Pancadas de chuva fortes"),
+    95: ("⛈️", "Trovoada"),
+    96: ("⛈️", "Trovoada com granizo"),
+    99: ("⛈️", "Trovoada forte com granizo"),
+}
+
+DIAS_SEMANA = ["Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado", "Domingo"]
+
+BRAZIL_STATE_UF = {
+    "acre": "AC", "alagoas": "AL", "amapa": "AP", "amazonas": "AM", "bahia": "BA",
+    "ceara": "CE", "distrito federal": "DF", "espirito santo": "ES", "goias": "GO",
+    "maranhao": "MA", "mato grosso": "MT", "mato grosso do sul": "MS", "minas gerais": "MG",
+    "para": "PA", "paraiba": "PB", "parana": "PR", "pernambuco": "PE", "piaui": "PI",
+    "rio de janeiro": "RJ", "rio grande do norte": "RN", "rio grande do sul": "RS",
+    "rondonia": "RO", "roraima": "RR", "santa catarina": "SC", "sao paulo": "SP",
+    "sergipe": "SE", "tocantins": "TO",
+}
+
+
+def _weather_desc(code) -> tuple[str, str]:
+    return WEATHER_CODE_MAP.get(code, ("🌡️", "Condicao desconhecida"))
+
+
+def _strip_accents(text: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _state_to_uf(state_name: str) -> str | None:
+    return BRAZIL_STATE_UF.get(_strip_accents(state_name).lower())
+
+
+def _geocode_city_sync(city: str) -> dict | None:
+    try:
+        resp = httpx.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": city, "count": 1, "language": "pt", "format": "json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        log.exception("Erro ao geocodificar cidade %s", city)
+        return None
+    results = data.get("results")
+    if not results:
+        return None
+    r = results[0]
+    return {
+        "name": r["name"],
+        "state": r.get("admin1", ""),
+        "country": r.get("country", ""),
+        "lat": r["latitude"],
+        "lon": r["longitude"],
+    }
+
+
+def _fetch_forecast_sync(lat: float, lon: float) -> dict | None:
+    try:
+        resp = httpx.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,weather_code,relative_humidity_2m,apparent_temperature",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+                "timezone": "America/Sao_Paulo",
+                "forecast_days": 7,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        log.exception("Erro ao buscar previsao do tempo")
+        return None
+
+
+def _fetch_inmet_alerts_sync(city: str, uf: str) -> list[dict]:
+    try:
+        resp = httpx.get("https://apiprevmet3.inmet.gov.br/avisos/ativos", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        log.exception("Erro ao buscar alertas INMET")
+        return []
+    target = f"{city} - {uf}"
+    alerts = []
+    for item in data.get("hoje", []) + data.get("futuro", []):
+        if target in item.get("municipios", ""):
+            alerts.append(item)
+    return alerts
+
+
+def build_weather_embed(location: dict, forecast: dict) -> discord.Embed:
+    current = forecast.get("current", {})
+    temp = current.get("temperature_2m")
+    feels = current.get("apparent_temperature")
+    humidity = current.get("relative_humidity_2m")
+    emoji, desc = _weather_desc(current.get("weather_code"))
+
+    description = f"**{temp}°C** — {desc}"
+    if feels is not None:
+        description += f" (sensacao de {feels}°C)"
+
+    embed = discord.Embed(
+        title=f"{emoji} Clima em {location['name']}, {location['state']}",
+        description=description,
+        color=discord.Color.blue(),
+    )
+    if humidity is not None:
+        embed.add_field(name="Umidade", value=f"{humidity}%", inline=True)
+
+    daily = forecast.get("daily", {})
+    dates = daily.get("time", [])
+    codes = daily.get("weather_code", [])
+    max_t = daily.get("temperature_2m_max", [])
+    min_t = daily.get("temperature_2m_min", [])
+
+    forecast_lines = []
+    for i, date_str in enumerate(dates):
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        dia = DIAS_SEMANA[dt.weekday()][:3]
+        e, d = _weather_desc(codes[i] if i < len(codes) else None)
+        forecast_lines.append(
+            f"{e} **{dia}** ({dt.strftime('%d/%m')}): {min_t[i]:.0f}°C - {max_t[i]:.0f}°C, {d}"
+        )
+
+    if forecast_lines:
+        embed.add_field(name="Previsao da semana", value="\n".join(forecast_lines), inline=False)
+
+    embed.set_footer(text="Fonte: Open-Meteo")
+    return embed
+
+
+def build_alert_embed(alerts: list[dict]) -> discord.Embed:
+    embed = discord.Embed(title="⚠️ Alerta de Defesa Civil / INMET", color=discord.Color.red())
+    for alert in alerts[:5]:
+        cor_hex = str(alert.get("aviso_cor", "#FF0000")).lstrip("#")
+        try:
+            embed.color = discord.Color(int(cor_hex, 16))
+        except ValueError:
+            pass
+        periodo = f"{alert.get('inicio', '?')} ate {alert.get('fim', '?')}"
+        riscos = " ".join(alert.get("riscos", []))[:500]
+        value = f"**Severidade:** {alert.get('severidade', '?')}\n**Periodo:** {periodo}\n{riscos}"
+        embed.add_field(name=alert.get("descricao", "Aviso"), value=value[:1024], inline=False)
+    embed.set_footer(text="Fonte: INMET (avisos.inmet.gov.br)")
+    return embed
 
 
 # ---------------- Noticias diarias ----------------
@@ -820,6 +995,15 @@ async def help_cmd(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
+        name="🌦️ Clima",
+        value=(
+            "`/clima <cidade>` — temperatura atual, sensacao termica, umidade e previsao "
+            "dos proximos 7 dias. Se tiver alerta ativo de Defesa Civil/INMET pra regiao, "
+            "mostro junto."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="📰 Noticias",
         value=(
             "`/noticias` — resumo agora, com cards por assunto (Geek, Ciencia, IA, Brasil, Mundo)\n"
@@ -864,6 +1048,36 @@ async def ask(interaction: discord.Interaction, pergunta: str):
     await interaction.edit_original_response(content=reply[:1900], embed=None)
     for chunk_start in range(1900, len(reply), 1900):
         await interaction.followup.send(reply[chunk_start:chunk_start + 1900])
+
+
+# ---------------- Slash commands: clima ----------------
+
+@bot.tree.command(name="clima", description="Clima atual e previsao da semana pra uma cidade")
+@app_commands.describe(cidade="Nome da cidade")
+async def clima(interaction: discord.Interaction, cidade: str):
+    await interaction.response.defer(thinking=True)
+    loop = asyncio.get_event_loop()
+
+    location = await loop.run_in_executor(None, _geocode_city_sync, cidade)
+    if location is None:
+        await interaction.followup.send(f"Nao encontrei a cidade '{cidade}'.")
+        return
+
+    forecast = await loop.run_in_executor(None, _fetch_forecast_sync, location["lat"], location["lon"])
+    if forecast is None:
+        await interaction.followup.send("Nao consegui buscar a previsao do tempo agora, tenta de novo.")
+        return
+
+    embeds = [build_weather_embed(location, forecast)]
+
+    if location.get("country") == "Brasil":
+        uf = _state_to_uf(location["state"])
+        if uf:
+            alerts = await loop.run_in_executor(None, _fetch_inmet_alerts_sync, location["name"], uf)
+            if alerts:
+                embeds.append(build_alert_embed(alerts))
+
+    await interaction.followup.send(embeds=embeds)
 
 
 # ---------------- Slash commands: noticias ----------------
