@@ -10,7 +10,6 @@ from collections import defaultdict, deque
 import discord
 from discord import app_commands
 from openai import OpenAI
-import yt_dlp
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("hermes-bot")
@@ -62,8 +61,8 @@ Tom e formato:
 - Nunca responda so com "depende, cada um e unico" - quando apropriado, escolha um lado e explique por que.
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
-- Comandos que voce realmente tem: /help, /ask, /join, /play, /skip, /pause, /resume, /nowplaying,
-  /stop, /queue, /kick, /addrole, /removerole, /criarcanal, /apagarcanal, /lock, /unlock.
+- Comandos que voce realmente tem: /help, /ask, /kick, /addrole, /removerole, /criarcanal,
+  /apagarcanal, /lock, /unlock.
 - Voce NAO tem: previsao do tempo, lembretes/agenda, busca na Wikipedia, calculadora,
   nem qualquer outro comando que nao esteja na lista acima.
 - Se alguem perguntar sobre seus comandos, liste APENAS os reais (ou sugira usar /help).
@@ -105,34 +104,15 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-YTDL_OPTS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "default_search": "ytsearch",
-    "nocheckcertificate": True,
-    "source_address": "0.0.0.0",
-}
-FFMPEG_OPTS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn",
-}
-ytdl = yt_dlp.YoutubeDL(YTDL_OPTS)
-
 
 class HermesBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self.queues: dict[int, list[dict]] = {}
-        self.now_playing_channel: dict[int, int] = {}
-        self.now_playing_track: dict[int, dict] = {}
-        self.idle_tasks: dict[int, asyncio.Task] = {}
         # (guild_id, user_id) -> deque[(timestamp, message_id, content, channel_id)]
         self.msg_log: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
         self.recently_punished: dict[tuple[int, int], float] = {}
         self.ambient_last_reply: dict[int, float] = {}
-        self.voice_locks: dict[int, asyncio.Lock] = {}
 
     async def setup_hook(self):
         init_db()
@@ -374,171 +354,6 @@ async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id
     return reply
 
 
-# ---------------- Music ----------------
-
-IDLE_DISCONNECT_SECONDS = 300  # desconecta sozinha se ficar 5min sem tocar nada
-VOICE_CONNECT_ATTEMPTS = 3
-
-
-async def connect_voice(channel: discord.VoiceChannel) -> discord.VoiceClient:
-    last_error: Exception | None = None
-    for attempt in range(1, VOICE_CONNECT_ATTEMPTS + 1):
-        try:
-            return await channel.connect(self_deaf=True, timeout=30, reconnect=False)
-        except Exception as exc:
-            last_error = exc
-            log.warning(
-                "Falha ao conectar na voz (tentativa %s/%s): %s", attempt, VOICE_CONNECT_ATTEMPTS, exc
-            )
-            if attempt < VOICE_CONNECT_ATTEMPTS:
-                await asyncio.sleep(2)
-    raise last_error
-
-
-async def extract_track(query: str) -> dict:
-    loop = asyncio.get_event_loop()
-
-    def _extract():
-        data = ytdl.extract_info(query, download=False)
-        if "entries" in data:
-            data = data["entries"][0]
-        return {"title": data.get("title", "Sem titulo"), "url": data["url"]}
-
-    return await loop.run_in_executor(None, _extract)
-
-
-def now_playing_embed(track: dict) -> discord.Embed:
-    embed = discord.Embed(
-        title="🎶 Tocando agora",
-        description=f"**{track['title']}**",
-        color=discord.Color.blurple(),
-    )
-    return embed
-
-
-class PlayerControls(discord.ui.View):
-    def __init__(self, guild_id: int):
-        super().__init__(timeout=None)
-        self.guild_id = guild_id
-
-    @discord.ui.button(label="Pausar/Retomar", style=discord.ButtonStyle.primary, emoji="⏯️")
-    async def toggle_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
-        vc = interaction.guild.voice_client
-        if vc is None:
-            await interaction.response.send_message("Nao estou conectada.", ephemeral=True)
-        elif vc.is_playing():
-            vc.pause()
-            await interaction.response.send_message("Pausado.", ephemeral=True)
-        elif vc.is_paused():
-            vc.resume()
-            await interaction.response.send_message("Retomado.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Nada tocando agora.", ephemeral=True)
-
-    @discord.ui.button(label="Pular", style=discord.ButtonStyle.secondary, emoji="⏭️")
-    async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        vc = interaction.guild.voice_client
-        if vc and (vc.is_playing() or vc.is_paused()):
-            vc.stop()
-            await interaction.response.send_message("Pulado.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Nada tocando agora.", ephemeral=True)
-
-    @discord.ui.button(label="Parar", style=discord.ButtonStyle.danger, emoji="⏹️")
-    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await stop_playback(interaction.guild)
-        await interaction.response.send_message("Parado e desconectada.", ephemeral=True)
-
-
-async def stop_playback(guild: discord.Guild):
-    guild_id = guild.id
-    bot.queues[guild_id] = []
-    bot.now_playing_track.pop(guild_id, None)
-    _cancel_idle_task(guild_id)
-    vc = guild.voice_client
-    if vc:
-        vc.stop()
-        await vc.disconnect(force=True)
-
-
-def _cancel_idle_task(guild_id: int):
-    task = bot.idle_tasks.get(guild_id)
-    if task and not task.done():
-        task.cancel()
-
-
-def _schedule_idle_disconnect(guild_id: int, voice_client: discord.VoiceClient):
-    _cancel_idle_task(guild_id)
-    bot.idle_tasks[guild_id] = asyncio.create_task(_idle_disconnect(guild_id, voice_client))
-
-
-async def _idle_disconnect(guild_id: int, voice_client: discord.VoiceClient):
-    try:
-        await asyncio.sleep(IDLE_DISCONNECT_SECONDS)
-    except asyncio.CancelledError:
-        return
-    if voice_client.is_connected() and not voice_client.is_playing() and not voice_client.is_paused():
-        log.info("Desconectando por inatividade no servidor %s", guild_id)
-        await voice_client.disconnect(force=True)
-        bot.queues[guild_id] = []
-
-
-def play_next(guild_id: int, voice_client: discord.VoiceClient) -> dict | None:
-    queue = bot.queues.get(guild_id, [])
-    if not queue:
-        _schedule_idle_disconnect(guild_id, voice_client)
-        return None
-
-    _cancel_idle_task(guild_id)
-    track = queue.pop(0)
-    bot.now_playing_track[guild_id] = track
-    source = discord.FFmpegPCMAudio(track["url"], **FFMPEG_OPTS)
-
-    def after(err):
-        if err:
-            log.error("Erro na reproducao: %s", err)
-        fut = asyncio.run_coroutine_threadsafe(_advance(guild_id, voice_client), bot.loop)
-        try:
-            fut.result()
-        except Exception:
-            log.exception("Erro ao avancar fila")
-
-    voice_client.play(source, after=after)
-    return track
-
-
-async def _advance(guild_id: int, voice_client: discord.VoiceClient):
-    track = play_next(guild_id, voice_client)
-    if track is None:
-        return
-    channel_id = bot.now_playing_channel.get(guild_id)
-    channel = bot.get_channel(channel_id) if channel_id else None
-    if channel:
-        await channel.send(embed=now_playing_embed(track), view=PlayerControls(guild_id))
-
-
-@bot.event
-async def on_voice_state_update(
-    member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
-):
-    if member.bot:
-        return
-    vc = member.guild.voice_client
-    if vc is None or vc.channel is None:
-        return
-    if before.channel != vc.channel and after.channel != vc.channel:
-        return
-
-    await asyncio.sleep(15)
-    vc = member.guild.voice_client
-    if vc is None or vc.channel is None:
-        return
-    humans = [m for m in vc.channel.members if not m.bot]
-    if not humans:
-        log.info("Saindo do canal de voz - ninguem mais la (guild %s)", member.guild.id)
-        await stop_playback(member.guild)
-
-
 # ---------------- Anti-flood / automod ----------------
 
 class ModerationView(discord.ui.View):
@@ -684,6 +499,11 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    if message.guild is None:
+        # Nunca responde DM - so o dono recebe DM da Solenne (aprovacao de moderacao),
+        # e ela nunca deve responder mensagens recebidas em DM de ninguem.
+        return
+
     await check_flood(message)
 
     mentioned = bot.user in message.mentions
@@ -735,20 +555,6 @@ async def help_cmd(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
-        name="🎵 Musica",
-        value=(
-            "`/join` — entra no seu canal de voz\n"
-            "`/play <nome ou link>` — toca (ou entra na fila), entra na call sozinha se precisar\n"
-            "`/skip` — pula\n"
-            "`/pause` / `/resume` — pausa/retoma\n"
-            "`/stop` — para tudo e sai do canal\n"
-            "`/queue` — mostra a fila\n"
-            "`/nowplaying` — mostra a musica atual com botoes de controle\n"
-            "Eu saio sozinha se ficar sozinha no canal ou parada por 5 minutos."
-        ),
-        inline=False,
-    )
-    embed.add_field(
         name="🛡️ Moderacao (automatica)",
         value=(
             "Detecto flood (mensagens repetidas, muitas seguidas, spam de mencao), "
@@ -783,148 +589,6 @@ async def ask(interaction: discord.Interaction, pergunta: str):
         reply = "Deu ruim aqui consultando o modelo, tenta de novo em instantes."
     for chunk_start in range(0, len(reply), 1900):
         await interaction.followup.send(reply[chunk_start:chunk_start + 1900])
-
-
-# ---------------- Slash commands: musica ----------------
-
-@bot.tree.command(name="join", description="Entra no seu canal de voz")
-async def join(interaction: discord.Interaction):
-    if interaction.user.voice is None:
-        await interaction.response.send_message("Voce precisa estar em um canal de voz.")
-        return
-
-    await interaction.response.defer()
-    channel = interaction.user.voice.channel
-
-    lock = bot.voice_locks.setdefault(interaction.guild_id, asyncio.Lock())
-    if lock.locked():
-        await interaction.followup.send("Ja estou tentando conectar, pera ai.")
-        return
-
-    async with lock:
-        vc = interaction.guild.voice_client
-        try:
-            if vc is None:
-                await connect_voice(channel)
-            elif vc.channel != channel:
-                await vc.move_to(channel)
-            else:
-                await interaction.followup.send(f"Ja estou em {channel.mention}.")
-                return
-        except Exception:
-            log.exception("Erro ao conectar no canal de voz")
-            await interaction.followup.send(
-                "Nao consegui conectar no canal de voz depois de varias tentativas. "
-                "Pode ser instabilidade momentanea, tenta de novo em um instante."
-            )
-            return
-
-    await interaction.followup.send(f"Entrei em {channel.mention}.")
-
-
-@bot.tree.command(name="play", description="Toca uma musica (nome ou link do YouTube)")
-@app_commands.describe(busca="Nome da musica ou link do YouTube")
-async def play(interaction: discord.Interaction, busca: str):
-    if interaction.user.voice is None:
-        await interaction.response.send_message("Voce precisa estar em um canal de voz.")
-        return
-
-    await interaction.response.defer()
-    channel = interaction.user.voice.channel
-
-    lock = bot.voice_locks.setdefault(interaction.guild_id, asyncio.Lock())
-    if lock.locked():
-        await interaction.followup.send("Ja estou tentando conectar, pera ai.")
-        return
-
-    async with lock:
-        vc = interaction.guild.voice_client
-        try:
-            if vc is None:
-                vc = await connect_voice(channel)
-            elif vc.channel != channel:
-                await vc.move_to(channel)
-        except Exception:
-            log.exception("Erro ao conectar no canal de voz")
-            await interaction.followup.send(
-                "Nao consegui conectar no canal de voz depois de varias tentativas. "
-                "Pode ser instabilidade momentanea, tenta de novo em um instante."
-            )
-            return
-
-    try:
-        track = await extract_track(busca)
-    except Exception:
-        log.exception("Erro ao buscar musica")
-        await interaction.followup.send("Nao consegui achar/baixar essa musica.")
-        return
-
-    bot.now_playing_channel[interaction.guild_id] = interaction.channel_id
-    bot.queues.setdefault(interaction.guild_id, []).append(track)
-
-    if not vc.is_playing() and not vc.is_paused():
-        play_next(interaction.guild_id, vc)
-        await interaction.followup.send(embed=now_playing_embed(track), view=PlayerControls(interaction.guild_id))
-    else:
-        await interaction.followup.send(f"Adicionado na fila: **{track['title']}**")
-
-
-@bot.tree.command(name="skip", description="Pula a musica atual")
-async def skip(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc and (vc.is_playing() or vc.is_paused()):
-        vc.stop()
-        await interaction.response.send_message("Pulado.")
-    else:
-        await interaction.response.send_message("Nada tocando agora.")
-
-
-@bot.tree.command(name="nowplaying", description="Mostra o que esta tocando com os controles")
-async def nowplaying(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    track = bot.now_playing_track.get(interaction.guild_id)
-    if not vc or not track or (not vc.is_playing() and not vc.is_paused()):
-        await interaction.response.send_message("Nada tocando agora.")
-        return
-    await interaction.response.send_message(
-        embed=now_playing_embed(track), view=PlayerControls(interaction.guild_id)
-    )
-
-
-@bot.tree.command(name="pause", description="Pausa a musica atual")
-async def pause(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc and vc.is_playing():
-        vc.pause()
-        await interaction.response.send_message("Pausado.")
-    else:
-        await interaction.response.send_message("Nada tocando agora.")
-
-
-@bot.tree.command(name="resume", description="Retoma a musica pausada")
-async def resume(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc and vc.is_paused():
-        vc.resume()
-        await interaction.response.send_message("Retomado.")
-    else:
-        await interaction.response.send_message("Nada pausado agora.")
-
-
-@bot.tree.command(name="stop", description="Para a musica, limpa a fila e sai do canal")
-async def stop(interaction: discord.Interaction):
-    await stop_playback(interaction.guild)
-    await interaction.response.send_message("Parado e desconectada.")
-
-
-@bot.tree.command(name="queue", description="Mostra a fila de musicas")
-async def queue_cmd(interaction: discord.Interaction):
-    q = bot.queues.get(interaction.guild_id, [])
-    if not q:
-        await interaction.response.send_message("Fila vazia.")
-        return
-    listing = "\n".join(f"{i + 1}. {t['title']}" for i, t in enumerate(q))
-    await interaction.response.send_message(listing[:1900])
 
 
 # ---------------- Slash commands: admin (somente dono) ----------------

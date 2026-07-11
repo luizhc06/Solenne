@@ -7,7 +7,6 @@ motor de inferencia e discord.py para integracao com o Discord.
 
 - Python 3.12 + [discord.py](https://github.com/Rapptz/discord.py)
 - [openai](https://github.com/openai/openai-python) (SDK usado apontando para o endpoint OpenAI-compatible da NVIDIA)
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) + ffmpeg para musica
 - Docker / Docker Compose para deploy
 - VM Oracle Cloud (Always Free, VM.Standard.E2.1.Micro)
 
@@ -18,7 +17,6 @@ motor de inferencia e discord.py para integracao com o Discord.
 - **Modo ambiente**: em canais especificos (`geral`, `comidas`, `bot`, `videojogos-geral`),
   o bot responde perguntas sem precisar ser mencionado, com cooldown de 3 minutos por canal
   para nao estourar o limite de requisicoes da API.
-- **Musica**: `/play`, `/skip`, `/pause`, `/resume`, `/stop`, `/queue`.
 - **Anti-flood / automod**: detecta flood de mensagens (muitas mensagens seguidas, mensagens
   repetidas ou spam de mencoes), apaga as mensagens e aplica timeout de 60s automaticamente.
   Manda uma DM para o dono com botoes de aprovacao para banir ou ignorar.
@@ -46,8 +44,12 @@ Ver `.env.example`. Copie para `.env` e preencha:
 docker compose up -d --build
 ```
 
-Requer `ffmpeg` (ja incluso na imagem Docker) e as intents privilegiadas
-**Message Content** e **Server Members** habilitadas no Developer Portal do bot.
+Requer as intents privilegiadas **Message Content** e **Server Members**
+habilitadas no Developer Portal do bot.
+
+> Nota: o bot ja teve suporte a musica (`/play`, `/join`, etc.), removido porque
+> a VM Always Free (1 vCPU / 1GB RAM) nao sustenta conexao de voz estavel com o
+> Discord (handshakes de voz falhando por limitacao de rede/CPU).
 
 ## Permissoes do bot no Discord
 
