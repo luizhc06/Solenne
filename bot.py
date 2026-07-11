@@ -1,10 +1,12 @@
 import os
 import re
+import html
 import time
 import sqlite3
 import asyncio
 import logging
 import unicodedata
+import urllib.parse
 from datetime import datetime, timedelta, timezone, time as dtime
 from zoneinfo import ZoneInfo
 from collections import defaultdict, deque
@@ -66,9 +68,10 @@ Tom e formato:
 - Nunca responda so com "depende, cada um e unico" - quando apropriado, escolha um lado e explique por que.
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
-- Comandos que voce realmente tem: /help, /ask, /noticias, /clima, /kick, /addrole, /removerole,
-  /criarcanal, /apagarcanal, /lock, /unlock.
+- Comandos que voce realmente tem: /help, /ask, /pesquisa, /noticias, /clima, /kick, /addrole,
+  /removerole, /criarcanal, /apagarcanal, /lock, /unlock.
 - /clima mostra o clima atual (real, via Open-Meteo) e alertas oficiais de Defesa Civil/INMET.
+- /pesquisa faz busca real na web (minimo 5 fontes) e resume com links das fontes.
 - Voce NAO tem: lembretes/agenda, busca na Wikipedia, calculadora, nem qualquer outro
   comando que nao esteja na lista acima.
 - Se alguem perguntar sobre seus comandos, liste APENAS os reais (ou sugira usar /help).
@@ -134,6 +137,7 @@ class HermesBot(discord.Client):
         await self.tree.sync(guild=None)
 
         daily_news_task.start()
+        rotate_status_task.start()
 
 
 bot = HermesBot()
@@ -144,6 +148,16 @@ def owner_only():
         if interaction.user.id != OWNER_USER_ID:
             await interaction.response.send_message(
                 "Esse comando e restrito ao dono do bot.", ephemeral=True
+            )
+            local = interaction.command.qualified_name if interaction.command else "?"
+            servidor = interaction.guild.name if interaction.guild else "DM"
+            asyncio.create_task(
+                notify_owner_text(
+                    f"⚠️ **Tentativa de uso de comando restrito**\n"
+                    f"**Usuario:** {interaction.user} (`{interaction.user.id}`)\n"
+                    f"**Comando:** /{local}\n"
+                    f"**Local:** {servidor}"
+                )
             )
             return False
         return True
@@ -166,6 +180,23 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 async def on_guild_join(guild: discord.Guild):
     if guild.id != ALLOWED_GUILD_ID:
         log.warning("Saindo de servidor nao autorizado: %s (%s)", guild.name, guild.id)
+
+        inviter_text = "Nao consegui identificar quem adicionou (sem permissao de ver o log de auditoria la)."
+        try:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.bot_add, limit=5):
+                if entry.target and entry.target.id == bot.user.id:
+                    inviter_text = f"**Adicionado por:** {entry.user} (`{entry.user.id}`)"
+                    break
+        except discord.Forbidden:
+            pass
+        except Exception:
+            log.exception("Erro ao consultar audit log do servidor %s", guild.id)
+
+        await notify_owner_text(
+            f"🚨 **Fui adicionada a um servidor nao autorizado e ja sai dele.**\n"
+            f"**Servidor:** {guild.name} (`{guild.id}`)\n"
+            f"{inviter_text}"
+        )
         await guild.leave()
 
 
@@ -386,6 +417,88 @@ def thinking_embed(text: str | None = None, eta_seconds: int = THINKING_ETA_SECO
 
 
 NEWS_THINKING_ETA_SECONDS = 40
+
+
+# ---------------- Pesquisa web ----------------
+
+SEARCH_MIN_SOURCES = 5
+SEARCH_MAX_SOURCES = 8
+
+DDG_RESULT_RE = re.compile(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
+DDG_SNIPPET_RE = re.compile(r'class="result__snippet"[^>]*>(.*?)</a>', re.DOTALL)
+
+
+def _clean_html_text(raw: str) -> str:
+    return html.unescape(TAG_RE.sub("", raw)).strip()
+
+
+def _extract_real_url(ddg_href: str) -> str:
+    full = ddg_href if ddg_href.startswith("http") else "https:" + ddg_href
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(full).query)
+    if "uddg" in qs:
+        return qs["uddg"][0]
+    return full
+
+
+def _web_search_sync(query: str, max_results: int = SEARCH_MAX_SOURCES) -> list[dict]:
+    try:
+        resp = httpx.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            timeout=10,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+    except Exception:
+        log.exception("Erro ao pesquisar '%s'", query)
+        return []
+
+    titles = DDG_RESULT_RE.findall(resp.text)
+    snippets = DDG_SNIPPET_RE.findall(resp.text)
+
+    results = []
+    for i, (href, title_raw) in enumerate(titles[:max_results]):
+        title = _clean_html_text(title_raw)
+        url = _extract_real_url(href)
+        snippet = _clean_html_text(snippets[i]) if i < len(snippets) else ""
+        if title and url:
+            results.append({"title": title, "url": url, "snippet": snippet})
+    return results
+
+
+SEARCH_SYNTHESIS_PROMPT = """Voce recebeu resultados reais de uma busca na web sobre uma pergunta.
+Baseie sua resposta SOMENTE no conteudo desses resultados - nunca invente informacao que nao esteja
+neles. Se os resultados nao derem informacao suficiente, diga isso claramente em vez de completar
+com achismo.
+
+Escreva uma resposta objetiva em portugues (paragrafos curtos ou lista), citando as fontes usando
+[1], [2] etc conforme o numero do resultado, no ponto onde aquela informacao foi usada. Nao repita a
+lista de fontes no final, isso e adicionado separadamente. Responda somente com o texto da resposta.
+
+Pergunta: {query}
+
+Resultados da busca:
+{results_text}"""
+
+
+def _synthesize_search_sync(query: str, results: list[dict]) -> str:
+    results_text = "\n".join(
+        f"[{i + 1}] {r['title']} - {r['snippet']}" for i, r in enumerate(results)
+    )
+    prompt = SEARCH_SYNTHESIS_PROMPT.format(query=query, results_text=results_text)
+    return _complete([{"role": "user", "content": prompt}], temperature=0.4)
+
+
+def build_search_embed(query: str, answer: str, results: list[dict]) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🔎 {query}",
+        description=answer[:4000],
+        color=discord.Color.teal(),
+    )
+    fontes = "\n".join(f"[{i + 1}] [{r['title'][:80]}]({r['url']})" for i, r in enumerate(results))
+    embed.add_field(name=f"Fontes ({len(results)})", value=fontes[:1024], inline=False)
+    return embed
 
 
 # ---------------- Clima ----------------
@@ -793,6 +906,32 @@ async def before_daily_news_task():
     await bot.wait_until_ready()
 
 
+# ---------------- Status rotativo ----------------
+
+STATUS_MESSAGES = [
+    "🛡️ Fazendo automod",
+    "🌦️ Pesquisando clima",
+    "📰 Investigando noticias",
+    "🔎 Pesquisando na web",
+    "🧠 Pensando em respostas",
+    "👀 De olho no servidor",
+    "📚 Resumindo o que rolou",
+]
+
+STATUS_ROTATE_MINUTES = 30
+
+
+@tasks.loop(minutes=STATUS_ROTATE_MINUTES)
+async def rotate_status_task():
+    text = STATUS_MESSAGES[rotate_status_task.current_loop % len(STATUS_MESSAGES)]
+    await bot.change_presence(activity=discord.CustomActivity(name=text))
+
+
+@rotate_status_task.before_loop
+async def before_rotate_status_task():
+    await bot.wait_until_ready()
+
+
 # ---------------- Anti-flood / automod ----------------
 
 class ModerationView(discord.ui.View):
@@ -836,6 +975,17 @@ class ModerationView(discord.ui.View):
             content=f"↩️ Ignorado. **{self.member_display}** so ficou com o timeout de {TIMEOUT_SECONDS}s.",
             view=self,
         )
+
+
+async def notify_owner_text(text: str):
+    owner = bot.get_user(OWNER_USER_ID) or await bot.fetch_user(OWNER_USER_ID)
+    if owner is None:
+        log.error("Nao encontrei o usuario dono (OWNER_USER_ID) para notificar.")
+        return
+    try:
+        await owner.send(text)
+    except discord.Forbidden:
+        log.error("Nao consegui mandar DM pro dono (DMs fechadas?).")
 
 
 async def notify_owner(guild: discord.Guild, member: discord.Member, reason: str, sample: str):
@@ -995,6 +1145,14 @@ async def help_cmd(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
+        name="🔎 Pesquisa",
+        value=(
+            "`/pesquisa <termo>` — pesquisa na web (minimo 5 fontes reais) e resume com "
+            "os links de onde tirei cada informacao."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="🌦️ Clima",
         value=(
             "`/clima <cidade>` — temperatura atual, sensacao termica, umidade e previsao "
@@ -1048,6 +1206,40 @@ async def ask(interaction: discord.Interaction, pergunta: str):
     await interaction.edit_original_response(content=reply[:1900], embed=None)
     for chunk_start in range(1900, len(reply), 1900):
         await interaction.followup.send(reply[chunk_start:chunk_start + 1900])
+
+
+# ---------------- Slash commands: pesquisa ----------------
+
+@bot.tree.command(name="pesquisa", description="Pesquisa na web (minimo 5 fontes) e resume com links")
+@app_commands.describe(termo="O que voce quer pesquisar")
+async def pesquisa(interaction: discord.Interaction, termo: str):
+    await interaction.response.send_message(
+        embed=thinking_embed(f"🔎 Pesquisando sobre \"{termo}\"...", eta_seconds=20)
+    )
+    loop = asyncio.get_event_loop()
+
+    results = await loop.run_in_executor(None, _web_search_sync, termo)
+    if len(results) < SEARCH_MIN_SOURCES:
+        await interaction.edit_original_response(
+            content=(
+                f"So encontrei {len(results)} fonte(s) confiavel(is) pra isso, "
+                "menos do que o minimo de 5. Tenta reformular a pesquisa."
+            ),
+            embed=None,
+        )
+        return
+
+    try:
+        answer = await loop.run_in_executor(None, _synthesize_search_sync, termo, results)
+    except Exception:
+        log.exception("Erro ao sintetizar pesquisa sobre '%s'", termo)
+        await interaction.edit_original_response(
+            content="Encontrei fontes mas deu erro ao resumir, tenta de novo.", embed=None
+        )
+        return
+
+    embed = build_search_embed(termo, answer, results)
+    await interaction.edit_original_response(content=None, embed=embed)
 
 
 # ---------------- Slash commands: clima ----------------
