@@ -75,7 +75,7 @@ Tom e formato:
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
 - Comandos que voce realmente tem: /help, /ask, /pesquisa, /noticias, /clima, /kick, /addrole,
-  /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar.
+  /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear.
 - /clima mostra o clima atual (real, via Open-Meteo) e alertas oficiais de Defesa Civil/INMET.
 - /pesquisa faz busca real na web (minimo 5 fontes) e resume com links das fontes.
 - Voce NAO tem: lembretes/agenda, busca na Wikipedia, calculadora, nem qualquer outro
@@ -1403,7 +1403,8 @@ async def help_cmd(interaction: discord.Interaction):
         name="🔒 Admin (somente o dono)",
         value=(
             "`/kick` `/addrole` `/removerole` `/criarcanal` `/apagarcanal` `/lock` `/unlock`\n"
-            "`/perturbar <usuario>` — brincadeira publica no canal, poucas mensagens espacadas"
+            "`/perturbar <usuario>` — brincadeira publica no canal, poucas mensagens espacadas\n"
+            "`/clear <quantidade>` — apaga as ultimas N mensagens do canal (1-100)"
         ),
         inline=False,
     )
@@ -1710,6 +1711,25 @@ async def unlock(interaction: discord.Interaction, canal: discord.TextChannel = 
         await interaction.response.send_message(f"🔓 {canal.mention} destrancado.")
     except discord.Forbidden:
         await interaction.response.send_message("Sem permissao de Gerenciar Canais.", ephemeral=True)
+
+
+@bot.tree.command(name="clear", description="[Dono] Apaga as ultimas N mensagens do canal")
+@owner_only()
+@app_commands.describe(quantidade="Quantas mensagens apagar (1-100)")
+async def clear(interaction: discord.Interaction, quantidade: app_commands.Range[int, 1, 100]):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        deleted = await interaction.channel.purge(limit=quantidade)
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "Sem permissao de Gerenciar Mensagens nesse canal.", ephemeral=True
+        )
+        return
+    except discord.HTTPException:
+        log.exception("Erro ao limpar mensagens")
+        await interaction.followup.send("Deu erro ao apagar as mensagens.", ephemeral=True)
+        return
+    await interaction.followup.send(f"🧹 Apaguei {len(deleted)} mensagem(ns).", ephemeral=True)
 
 
 if __name__ == "__main__":
