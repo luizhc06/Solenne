@@ -724,26 +724,6 @@ NEWS_CATEGORIES = {
 }
 
 TAG_RE = re.compile(r"<[^<]+?>")
-IMG_SRC_RE = re.compile(r'<img[^>]+src="([^"]+)"')
-
-
-def _extract_image(entry) -> str | None:
-    media_thumb = entry.get("media_thumbnail")
-    if media_thumb:
-        return media_thumb[0].get("url")
-    media_content = entry.get("media_content")
-    if media_content:
-        for m in media_content:
-            if m.get("url"):
-                return m["url"]
-    for link in entry.get("links", []):
-        if str(link.get("type", "")).startswith("image/"):
-            return link.get("href")
-    raw_html = entry.get("summary", "") + entry.get("description", "")
-    match = IMG_SRC_RE.search(raw_html)
-    if match:
-        return match.group(1)
-    return None
 
 
 def _fetch_feed_entries(name: str, url: str, cutoff: datetime) -> list[dict]:
@@ -770,7 +750,6 @@ def _fetch_feed_entries(name: str, url: str, cutoff: datetime) -> list[dict]:
                 "link": link,
                 "summary": summary,
                 "source": name,
-                "image": _extract_image(entry),
             }
         )
     return entries
@@ -842,8 +821,6 @@ def build_item_embed(category: dict, item: dict) -> discord.Embed:
         color=category["color"],
     )
     embed.set_footer(text=f"Fonte: {item['source']}")
-    if item.get("image"):
-        embed.set_image(url=item["image"])
     return embed
 
 
@@ -883,7 +860,11 @@ async def post_news_digest(channel: discord.TextChannel):
     await placeholder.edit(content=f"📰 **Resumo de noticias — {today}**", embed=None)
     for category, embeds in sections:
         await channel.send(f"**━━━ {category['label']} ━━━**")
-        await channel.send(embeds=embeds)
+        try:
+            await channel.send(embeds=embeds)
+        except discord.HTTPException:
+            log.exception("Erro ao enviar embeds da categoria %s", category["label"])
+            await channel.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
 
 
 @tasks.loop(time=NEWS_POST_TIME)
@@ -1291,7 +1272,11 @@ async def noticias(interaction: discord.Interaction):
     await interaction.edit_original_response(content=f"📰 **Resumo de noticias — {today}**", embed=None)
     for category, embeds in sections:
         await interaction.followup.send(f"**━━━ {category['label']} ━━━**")
-        await interaction.followup.send(embeds=embeds)
+        try:
+            await interaction.followup.send(embeds=embeds)
+        except discord.HTTPException:
+            log.exception("Erro ao enviar embeds da categoria %s", category["label"])
+            await interaction.followup.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
 
 
 # ---------------- Slash commands: admin (somente dono) ----------------

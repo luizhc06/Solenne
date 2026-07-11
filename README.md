@@ -40,7 +40,7 @@ motor de inferencia e discord.py para integracao com o Discord.
 - Fontes reais via RSS (nunca inventadas): Geek/Tecnologia, Ciencia, Inteligencia Artificial,
   Brasil (G1) e Mundo/Geopolitica (BBC, Al Jazeera).
 - Titulo e resumo traduzidos/resumidos para PT-BR pela IA a partir do texto real do feed,
-  com imagem por noticia (quando disponivel) e link da fonte original sempre presente.
+  com link da fonte original sempre presente.
 
 ### Clima
 - `/clima <cidade>`: temperatura atual, sensacao termica, umidade e previsao dos proximos
