@@ -273,7 +273,7 @@ class ChatCog(commands.Cog):
         embed.add_field(
             name="📰 Noticias",
             value=(
-                "`/noticias` — resumo agora, com cards por assunto (Geek, Ciencia, IA, Brasil, Mundo)\n"
+                "`/noticias` — resumo agora, com cards por assunto (Geek/Anime, Tecnologia, Ciencia, IA, Brasil, Mundo)\n"
                 "Todo dia ao meio-dia eu posto automaticamente em #noticias. "
                 "So uso fontes reais (RSS de veiculos conhecidos) e sempre linko a fonte original."
             ),

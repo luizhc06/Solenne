@@ -14,6 +14,7 @@ from db import filter_unposted_links, mark_news_posted
 from ai_client import ai_lock, _complete
 from utils import thinking_embed, NEWS_THINKING_ETA_SECONDS
 from views import FeedbackView
+from notify import notify_owner_text
 
 log = logging.getLogger("hermes-bot")
 
@@ -24,11 +25,19 @@ NEWS_ITEMS_PER_CATEGORY = 4
 
 NEWS_CATEGORIES = {
     "geek": {
-        "label": "🕹️ Geek & Tecnologia",
+        "label": "🎌 Geek & Anime",
         "color": discord.Color.blue(),
         "feeds": [
-            ("The Verge", "https://www.theverge.com/rss/index.xml"),
-            ("Ars Technica", "https://feeds.arstechnica.com/arstechnica/index"),
+            ("Anime News Network", "https://www.animenewsnetwork.com/newsfeed/rss.xml"),
+            ("MyAnimeList", "https://myanimelist.net/rss/news.xml"),
+        ],
+    },
+    "tecnologia": {
+        "label": "💻 Tecnologia & Hardware",
+        "color": discord.Color.dark_blue(),
+        "feeds": [
+            ("Tom's Hardware", "https://www.tomshardware.com/feeds/all"),
+            ("Wccftech", "https://wccftech.com/feed/"),
         ],
     },
     "ciencia": {
@@ -240,7 +249,11 @@ async def build_news_digest() -> list[tuple[dict, list[discord.Embed]]]:
     sections = []
     for category in NEWS_CATEGORIES.values():
         raw_items = await loop.run_in_executor(None, _collect_category_items, category)
-        curated = await _summarize_category(raw_items)
+        # So a chamada de IA fica dentro do lock global - o post automatico e um
+        # /noticias manual rodando ao mesmo tempo nao devem martelar a API da NVIDIA
+        # em paralelo (isso agrava 504s la e ja causou digest incompleto).
+        async with ai_lock:
+            curated = await _summarize_category(raw_items)
         embeds = [build_item_embed(category, item) for item in curated]
         if embeds:
             sections.append((category, embeds))
@@ -307,6 +320,7 @@ class NewsCog(commands.Cog):
             await post_news_digest(channel)
         except Exception:
             log.exception("Erro ao postar resumo diario de noticias")
+            await notify_owner_text(self.bot, "⚠️ O resumo diario de noticias falhou. Confere os logs.")
 
     @daily_news_task.before_loop
     async def before_daily_news_task(self):
@@ -314,33 +328,18 @@ class NewsCog(commands.Cog):
 
     @app_commands.command(name="noticias", description="Manda um resumo de noticias agora")
     async def noticias(self, interaction: discord.Interaction):
+        # A geracao pode demorar varios minutos (traducao de 5 categorias, as vezes
+        # com retry por instabilidade da API da NVIDIA) - o token do webhook da
+        # interacao expira em 15min, entao a partir daqui tudo vai direto pro canal
+        # (channel.send/message.edit nao expiram) em vez de interaction.followup.
         await interaction.response.send_message(
-            embed=thinking_embed(
-                "📰 Buscando e resumindo as noticias...", eta_seconds=NEWS_THINKING_ETA_SECONDS
-            )
+            "📰 Preparando o resumo de noticias, ja chega no canal...", ephemeral=True
         )
-        sections = await build_news_digest()
-        if not sections:
-            await interaction.edit_original_response(
-                content="Nao encontrei noticias relevantes nas ultimas horas.", embed=None
-            )
-            return
-        today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
-        intro = await build_news_intro()
-        
-        header_embed = discord.Embed(description=f"**{intro}**", color=discord.Color.purple())
-        header_embed.set_author(name=f"Resumo de Notícias — {today}", icon_url=interaction.client.user.display_avatar.url)
-        
-        await interaction.edit_original_response(
-            content=None, embed=header_embed
-        )
-        for category, embeds in sections:
-            await interaction.followup.send(f"# {category['label']}")
-            try:
-                await interaction.followup.send(embeds=embeds, view=FeedbackView(category["label"]))
-            except discord.HTTPException:
-                log.exception("Erro ao enviar embeds da categoria %s", category["label"])
-                await interaction.followup.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
+        try:
+            await post_news_digest(interaction.channel)
+        except Exception:
+            log.exception("Erro ao gerar resumo de noticias sob demanda")
+            await interaction.channel.send("Deu erro ao gerar o resumo de noticias, tenta de novo.")
 
 
 async def setup(bot: commands.Bot):
