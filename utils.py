@@ -6,7 +6,7 @@ import discord
 AMBIENT_CHANNEL_NAMES = {"geral", "comidas", "bot", "videojogos-geral"}
 AMBIENT_COOLDOWN_SECONDS = 180
 
-THINKING_GIF_URL = "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif"
+THINKING_GIF_URL = "https://media.giphy.com/media/2WjpfxAI5MvC9Nl8U7/100w.gif"
 THINKING_ETA_SECONDS = 20
 NEWS_THINKING_ETA_SECONDS = 40
 
