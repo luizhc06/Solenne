@@ -5,13 +5,32 @@ motor de inferencia e discord.py para integracao com o Discord.
 
 ## Stack
 
-- Python 3.12 + [discord.py](https://github.com/Rapptz/discord.py)
-- [openai](https://github.com/openai/openai-python) (SDK usado apontando para o endpoint OpenAI-compatible da NVIDIA)
+- Python 3.12 + [discord.py](https://github.com/Rapptz/discord.py) (bot estruturado em Cogs/extensions)
+- [openai](https://github.com/openai/openai-python) `AsyncOpenAI` (SDK usado apontando para o endpoint OpenAI-compatible da NVIDIA, chamado de forma assincrona nativa)
 - [feedparser](https://github.com/kurtmckee/feedparser) para os feeds RSS de noticias
 - [httpx](https://github.com/encode/httpx) para as APIs de clima, alertas e busca web
 - SQLite (memoria persistente, sem dependencia externa)
 - Docker / Docker Compose para deploy
 - VM Oracle Cloud (Always Free, VM.Standard.E2.1.Micro)
+
+## Estrutura do codigo
+
+O bot e modularizado em Cogs (extensions do discord.py), com a infraestrutura
+compartilhada em modulos de nivel superior:
+
+- `bot.py` — entrypoint: cria o `HermesBot` (`commands.Bot`), carrega os cogs e sincroniza os slash commands.
+- `config.py` — variaveis de ambiente, logging e constantes globais.
+- `db.py` — todo o acesso a SQLite (historico, perfis, dedup de noticias, backup).
+- `ai_client.py` — cliente `AsyncOpenAI`, o lock global de uma resposta por vez e o pipeline de raciocinio em multiplas passadas.
+- `user_profile.py` — atualizacao do resumo de perfil por pessoa.
+- `views.py` / `utils.py` / `notify.py` — UI compartilhada (botoes de feedback), helpers (embed de "pensando", deteccao de pergunta) e notificacao por DM ao dono.
+- `cogs/chat.py` — persona (`SYSTEM_PROMPT`), `/ask`, `/help` e o gatilho de conversa por mencao/modo ambiente.
+- `cogs/search.py` — busca web e `/pesquisa`.
+- `cogs/weather.py` — clima/alertas e `/clima` (com cache em memoria, ver abaixo).
+- `cogs/news.py` — resumo diario de noticias e `/noticias`.
+- `cogs/moderation.py` — anti-flood/automod.
+- `cogs/admin.py` — comandos restritos ao dono (`/kick`, `/perturbar`, `/clear`, etc.).
+- `cogs/core.py` — trava de servidor, status rotativo e backup diario.
 
 ## Funcionalidades
 
@@ -56,6 +75,9 @@ motor de inferencia e discord.py para integracao com o Discord.
   7 dias via Open-Meteo (sem precisar de API key).
 - Alertas oficiais ativos do INMET (que alimentam a Defesa Civil) para a regiao da cidade,
   quando existentes: severidade, periodo de validade, riscos e instrucoes.
+- **Cache em memoria (~20 min)** para geocodificacao, previsao e alertas INMET, pra nao
+  bater repetidamente nas APIs externas quando varias pessoas perguntam a mesma cidade
+  em um curto periodo.
 
 ### Moderacao e seguranca
 - **Anti-flood / automod**: detecta flood de mensagens (muitas mensagens seguidas, mensagens
