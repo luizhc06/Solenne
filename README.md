@@ -103,9 +103,11 @@ compartilhada em modulos de nivel superior:
 
 ### Qualidade de vida
 - **Conversor de links**: mensagens com links do Twitter/X, Instagram (post/reel) ou TikTok
-  recebem automaticamente uma versao corrigida (`fxtwitter.com`, `ddinstagram.com`,
+  recebem automaticamente uma versao corrigida (`fxtwitter.com`, `kkinstagram.com`,
   `vxtiktok.com`) que embeda corretamente no Discord, e a mensagem original tem o embed
   quebrado suprimido (quando o bot tem permissao de Gerenciar Mensagens no canal).
+  Esses dominios de embed-fix mudam com frequencia (takedowns) - se o Instagram parar
+  de embedar de novo, o dominio provavelmente caiu e precisa ser trocado em `cogs/linkfix.py`.
 
 ### Infraestrutura e confiabilidade
 - **Backup diario** do banco SQLite (3h da manha, horario de Brasilia), com retencao de

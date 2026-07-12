@@ -17,7 +17,11 @@ def _convert_links(content: str) -> list[str]:
     for link in TWITTER_RE.findall(content):
         converted.append(link.replace("twitter.com", "fxtwitter.com").replace("x.com", "fxtwitter.com"))
     for link in INSTAGRAM_RE.findall(content):
-        converted.append(link.replace("instagram.com", "ddinstagram.com"))
+        # ddinstagram.com saiu do ar (NXDOMAIN) - esses servicos de embed-fix mudam de
+        # dominio com frequencia (takedowns). kkinstagram.com confirmado funcionando em
+        # 2026-07: redireciona (302) direto pro CDN de video do Instagram quando detecta
+        # o user-agent do Discordbot.
+        converted.append(link.replace("instagram.com", "kkinstagram.com"))
     for link in TIKTOK_RE.findall(content):
         converted.append(link.replace("tiktok.com", "vxtiktok.com"))
     return converted

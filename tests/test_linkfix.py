@@ -12,7 +12,7 @@ def test_convert_links_x_domain():
 
 
 def test_convert_links_instagram_reel():
-    assert _convert_links("https://instagram.com/reel/abc123") == ["https://ddinstagram.com/reel/abc123"]
+    assert _convert_links("https://instagram.com/reel/abc123") == ["https://kkinstagram.com/reel/abc123"]
 
 
 def test_convert_links_tiktok():
