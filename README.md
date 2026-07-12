@@ -66,7 +66,8 @@ compartilhada em modulos de nivel superior:
 ### Noticias
 - `/noticias`: resumo sob demanda, ou automatico todo dia ao meio-dia (horario de Brasilia)
   em um canal com "noticias" no nome. Divisorias por categoria usam heading (`#`) do Discord.
-- Fontes reais via RSS (nunca inventadas): Geek/Tecnologia, Ciencia, Inteligencia Artificial,
+- Fontes reais via RSS (nunca inventadas): Geek & Anime (Anime News Network, MyAnimeList),
+  Tecnologia & Hardware (Tom's Hardware, Wccftech), Ciencia, Inteligencia Artificial,
   Brasil (G1) e Mundo/Geopolitica (BBC, Al Jazeera).
 - Titulo e resumo traduzidos/resumidos para PT-BR pela IA a partir do texto real do feed,
   com link da fonte original sempre presente.
