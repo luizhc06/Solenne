@@ -71,6 +71,10 @@ compartilhada em modulos de nivel superior:
   Brasil (G1) e Mundo/Geopolitica (BBC, Al Jazeera).
 - Titulo e resumo traduzidos/resumidos para PT-BR pela IA a partir do texto real do feed,
   com link da fonte original sempre presente.
+- **Personalizacao da categoria Geek & Anime**: busca o perfil publico do dono no
+  [AniList](https://anilist.co/) (generos favoritos e series bem avaliadas, cache de 12h)
+  e usa isso pra priorizar noticias relacionadas na hora de escolher as mais relevantes,
+  sem excluir noticias importantes fora do perfil.
 - **Deduplicacao**: noticias ja mostradas nos ultimos 2 dias nao repetem entre o post
   automatico e execucoes manuais do `/noticias`.
 

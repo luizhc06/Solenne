@@ -1,4 +1,3 @@
-import time
 import asyncio
 import logging
 import unicodedata
@@ -10,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import DIAS_SEMANA
+from utils import TTLCache
 
 log = logging.getLogger("hermes-bot")
 
@@ -52,29 +52,9 @@ BRAZIL_STATE_UF = {
 # em um curto periodo. Sem dependencia nova: so um dict com timestamp de expiracao.
 WEATHER_CACHE_TTL_SECONDS = 20 * 60
 
-
-class _TTLCache:
-    def __init__(self, ttl_seconds: float):
-        self.ttl = ttl_seconds
-        self._store: dict = {}
-
-    def get(self, key):
-        entry = self._store.get(key)
-        if entry is None:
-            return None, False
-        expires_at, value = entry
-        if time.monotonic() > expires_at:
-            del self._store[key]
-            return None, False
-        return value, True
-
-    def set(self, key, value):
-        self._store[key] = (time.monotonic() + self.ttl, value)
-
-
-_geocode_cache = _TTLCache(WEATHER_CACHE_TTL_SECONDS)
-_forecast_cache = _TTLCache(WEATHER_CACHE_TTL_SECONDS)
-_inmet_cache = _TTLCache(WEATHER_CACHE_TTL_SECONDS)
+_geocode_cache = TTLCache(WEATHER_CACHE_TTL_SECONDS)
+_forecast_cache = TTLCache(WEATHER_CACHE_TTL_SECONDS)
+_inmet_cache = TTLCache(WEATHER_CACHE_TTL_SECONDS)
 
 
 def _weather_desc(code) -> tuple[str, str]:

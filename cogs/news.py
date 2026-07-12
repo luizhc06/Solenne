@@ -4,6 +4,7 @@ import random
 import logging
 from datetime import datetime, timedelta, timezone, time as dtime
 
+import httpx
 import feedparser
 import discord
 from discord import app_commands
@@ -12,7 +13,7 @@ from discord.ext import commands, tasks
 from config import ALLOWED_GUILD_ID, NEWS_TIMEZONE
 from db import filter_unposted_links, mark_news_posted
 from ai_client import ai_lock, _complete
-from utils import thinking_embed, NEWS_THINKING_ETA_SECONDS
+from utils import thinking_embed, NEWS_THINKING_ETA_SECONDS, TTLCache
 from views import FeedbackView
 from notify import notify_owner_text
 
@@ -22,6 +23,87 @@ NEWS_CHANNEL_NAME = "noticias"
 NEWS_POST_TIME = dtime(hour=12, minute=0, tzinfo=NEWS_TIMEZONE)
 NEWS_LOOKBACK_HOURS = 30
 NEWS_ITEMS_PER_CATEGORY = 4
+
+# Personalizacao da categoria "geek" com base no perfil de anime do dono no AniList.
+ANILIST_USERNAME = "Rizuw"
+ANILIST_API_URL = "https://graphql.anilist.co"
+ANILIST_CACHE_TTL_SECONDS = 12 * 60 * 60  # perfil nao muda de hora em hora
+ANILIST_MIN_SCORE_FOR_HIGHLIGHT = 7
+
+ANILIST_QUERY = """
+query ($name: String) {
+  MediaListCollection(userName: $name, type: ANIME, status_in: [CURRENT, COMPLETED, PLANNING]) {
+    lists {
+      entries {
+        score
+        media {
+          title { romaji }
+          genres
+        }
+      }
+    }
+  }
+}
+"""
+
+_anilist_cache = TTLCache(ANILIST_CACHE_TTL_SECONDS)
+
+
+def _fetch_anilist_interest_sync() -> str:
+    """Resumo curto (generos favoritos + series bem avaliadas) do perfil AniList do
+    dono, usado so pra dar contexto de curadoria na categoria Geek & Anime."""
+    cached, hit = _anilist_cache.get(ANILIST_USERNAME)
+    if hit:
+        return cached
+
+    try:
+        resp = httpx.post(
+            ANILIST_API_URL,
+            json={"query": ANILIST_QUERY, "variables": {"name": ANILIST_USERNAME}},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        log.exception("Erro ao buscar perfil do AniList")
+        return ""
+
+    entries = []
+    for lst in data.get("data", {}).get("MediaListCollection", {}).get("lists") or []:
+        entries.extend(lst.get("entries") or [])
+
+    interest = _summarize_anilist_entries(entries)
+    _anilist_cache.set(ANILIST_USERNAME, interest)
+    return interest
+
+
+def _summarize_anilist_entries(entries: list[dict]) -> str:
+    """Extrai generos favoritos e series bem avaliadas de uma lista de entries do
+    AniList (formato bruto da API). Separado do fetch pra poder testar sem rede."""
+    if not entries:
+        return ""
+
+    genre_counts: dict[str, int] = {}
+    for entry in entries:
+        for genre in (entry.get("media") or {}).get("genres") or []:
+            genre_counts[genre] = genre_counts.get(genre, 0) + 1
+    top_genres = sorted(genre_counts, key=genre_counts.get, reverse=True)[:5]
+
+    scored = [e for e in entries if (e.get("score") or 0) >= ANILIST_MIN_SCORE_FOR_HIGHLIGHT]
+    scored.sort(key=lambda e: e.get("score", 0), reverse=True)
+    top_titles = [
+        e["media"]["title"]["romaji"]
+        for e in scored[:8]
+        if (e.get("media") or {}).get("title", {}).get("romaji")
+    ]
+
+    parts = []
+    if top_genres:
+        parts.append("generos favoritos: " + ", ".join(top_genres))
+    if top_titles:
+        parts.append("series que gosta/acompanha: " + ", ".join(top_titles))
+    return "; ".join(parts)
+
 
 NEWS_CATEGORIES = {
     "geek": {
@@ -159,13 +241,20 @@ Noticias:
 {items_text}"""
 
 
-async def _summarize_category(items: list[dict]) -> list[dict]:
+async def _summarize_category(items: list[dict], interest_hint: str = "") -> list[dict]:
     if not items:
         return []
     items_text = "\n".join(
         f"{i}. [{it['source']}] {it['title']} - {it['summary']}" for i, it in enumerate(items)
     )
     prompt = NEWS_SUMMARY_PROMPT.format(n=min(NEWS_ITEMS_PER_CATEGORY, len(items)), items_text=items_text)
+    if interest_hint:
+        prompt += (
+            f"\n\nContexto extra sobre quem vai ler: perfil de anime no AniList - {interest_hint}. "
+            "Ao escolher as noticias mais relevantes, priorize as relacionadas a esses generos ou "
+            "series quando fizer sentido - mas noticias muito importantes fora desse perfil ainda "
+            "podem entrar, nao force a conexao se nao houver."
+        )
 
     async def _try_once() -> list[dict]:
         # max_tokens generoso: 4 itens com titulo+resumo traduzidos podem passar
@@ -247,13 +336,16 @@ async def build_news_intro() -> str:
 async def build_news_digest() -> list[tuple[dict, list[discord.Embed]]]:
     loop = asyncio.get_event_loop()
     sections = []
-    for category in NEWS_CATEGORIES.values():
+    for key, category in NEWS_CATEGORIES.items():
         raw_items = await loop.run_in_executor(None, _collect_category_items, category)
+        interest_hint = ""
+        if key == "geek":
+            interest_hint = await loop.run_in_executor(None, _fetch_anilist_interest_sync)
         # So a chamada de IA fica dentro do lock global - o post automatico e um
         # /noticias manual rodando ao mesmo tempo nao devem martelar a API da NVIDIA
         # em paralelo (isso agrava 504s la e ja causou digest incompleto).
         async with ai_lock:
-            curated = await _summarize_category(raw_items)
+            curated = await _summarize_category(raw_items, interest_hint)
         embeds = [build_item_embed(category, item) for item in curated]
         if embeds:
             sections.append((category, embeds))

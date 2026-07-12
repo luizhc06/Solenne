@@ -1,4 +1,5 @@
 import re
+import time
 
 import discord
 
@@ -33,3 +34,25 @@ def thinking_embed(text: str | None = None, eta_seconds: int = THINKING_ETA_SECO
     embed = discord.Embed(color=discord.Color.blurple())
     embed.set_author(name=text, icon_url=THINKING_GIF_URL)
     return embed
+
+
+class TTLCache:
+    """Cache simples em memoria com expiracao - evita bater toda hora em APIs
+    externas que nao mudam com frequencia (clima, perfil de interesses etc)."""
+
+    def __init__(self, ttl_seconds: float):
+        self.ttl = ttl_seconds
+        self._store: dict = {}
+
+    def get(self, key):
+        entry = self._store.get(key)
+        if entry is None:
+            return None, False
+        expires_at, value = entry
+        if time.monotonic() > expires_at:
+            del self._store[key]
+            return None, False
+        return value, True
+
+    def set(self, key, value):
+        self._store[key] = (time.monotonic() + self.ttl, value)
