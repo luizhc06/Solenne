@@ -13,6 +13,7 @@ EXTENSIONS = [
     "cogs.weather",
     "cogs.news",
     "cogs.admin",
+    "cogs.linkfix",
 ]
 
 

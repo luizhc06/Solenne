@@ -8,8 +8,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import OWNER_USER_ID, NEWS_TIMEZONE, DIAS_SEMANA
-from db import load_recent_history, save_message, get_user_summary
-from ai_client import ai_lock, _think_and_answer
+from db import load_recent_history, save_message, get_user_summary, load_user_messages
+from ai_client import ai_lock, _think_and_answer, _complete
 from user_profile import update_profile
 from utils import thinking_embed, is_ambient_channel, looks_like_question, AMBIENT_COOLDOWN_SECONDS
 from views import FeedbackView
@@ -59,10 +59,12 @@ Tom e formato:
   de um jeito engracado em vez de seco).
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
-- Comandos que voce realmente tem: /help, /ask, /pesquisa, /noticias, /clima, /kick, /addrole,
-  /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear.
+- Comandos que voce realmente tem: /help, /ask, /resumo, /pesquisa, /noticias, /clima, /status,
+  /kick, /addrole, /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear.
 - /clima mostra o clima atual (real, via Open-Meteo) e alertas oficiais de Defesa Civil/INMET.
 - /pesquisa faz busca real na web (minimo 5 fontes) e resume com links das fontes.
+- /resumo resume as ultimas mensagens do canal atual (fofoca do que rolou).
+- /status mostra uptime, latencia e saude da Solenne.
 - Voce NAO tem: lembretes/agenda, busca na Wikipedia, calculadora, nem qualquer outro
   comando que nao esteja na lista acima.
 - Se alguem perguntar sobre seus comandos, liste APENAS os reais (ou sugira usar /help).
@@ -116,6 +118,28 @@ async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id
         asyncio.create_task(update_profile(author_id, author_name, user_msg))
 
         return reply
+
+
+SUMMARY_PROMPT = """Voce e Solenne, IA pessoal do Rizu.
+Voce recebeu um historico recente de mensagens de um canal do Discord.
+Faca um resumo divertido, fofoqueiro e bem direto em portugues sobre o que as pessoas
+estavam conversando. Evite formatacao formal de relatorio. Use girias leves do Discord se
+fizer sentido e mencione os principais assuntos debatidos pelos usuarios. Nao invente
+assunto que nao esteja no historico.
+
+Historico de mensagens:
+{chat_history_text}"""
+
+
+async def summarize_channel(channel_id: int, limit: int) -> str:
+    async with ai_lock:
+        loop = asyncio.get_event_loop()
+        raw_history = await loop.run_in_executor(None, load_user_messages, channel_id, limit)
+        if not raw_history:
+            return ""
+        history_text = "\n".join(f"{msg['author']}: {msg['content']}" for msg in raw_history)
+        prompt = SUMMARY_PROMPT.format(chat_history_text=history_text)
+        return await _complete([{"role": "user", "content": prompt}], temperature=0.8, max_tokens=800)
 
 
 class ChatCog(commands.Cog):
@@ -193,6 +217,21 @@ class ChatCog(commands.Cog):
         for chunk_start in range(1900, len(reply), 1900):
             await interaction.followup.send(reply[chunk_start:chunk_start + 1900])
 
+    @app_commands.command(name="resumo", description="Resume o que rolou de conversa recente no canal")
+    @app_commands.describe(mensagens="Quantas mensagens analisar (10-100, padrao 50)")
+    async def resumo(self, interaction: discord.Interaction, mensagens: app_commands.Range[int, 10, 100] = 50):
+        await interaction.response.defer(thinking=True)
+        try:
+            summary = await summarize_channel(interaction.channel_id, mensagens)
+        except Exception:
+            log.exception("Erro ao resumir canal")
+            await interaction.followup.send("Deu ruim ao tentar resumir as fofocas desse canal, tenta de novo.")
+            return
+        if not summary:
+            await interaction.followup.send("Nao encontrei historico de conversa registrado nesse canal ainda.")
+            return
+        await interaction.followup.send(summary[:2000])
+
     @app_commands.command(name="help", description="Mostra os comandos da Solenne")
     async def help_cmd(self, interaction: discord.Interaction):
         embed = discord.Embed(
@@ -207,6 +246,7 @@ class ChatCog(commands.Cog):
             value=(
                 "`/ask <pergunta>` — pergunta algo\n"
                 "`@Solenne <mensagem>` — mesma coisa, mencionando\n"
+                "`/resumo [mensagens]` — resume o que rolou de conversa recente no canal\n"
                 "Nos canais geral, comidas, bot e videojogos-geral eu tambem respondo perguntas sozinha."
             ),
             inline=False,
@@ -237,6 +277,11 @@ class ChatCog(commands.Cog):
                 "Todo dia ao meio-dia eu posto automaticamente em #noticias. "
                 "So uso fontes reais (RSS de veiculos conhecidos) e sempre linko a fonte original."
             ),
+            inline=False,
+        )
+        embed.add_field(
+            name="📊 Status",
+            value="`/status` — uptime, latencia e saude da Solenne.",
             inline=False,
         )
         embed.add_field(

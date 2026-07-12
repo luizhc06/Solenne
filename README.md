@@ -30,7 +30,8 @@ compartilhada em modulos de nivel superior:
 - `cogs/news.py` — resumo diario de noticias e `/noticias`.
 - `cogs/moderation.py` — anti-flood/automod.
 - `cogs/admin.py` — comandos restritos ao dono (`/kick`, `/perturbar`, `/clear`, etc.).
-- `cogs/core.py` — trava de servidor, status rotativo e backup diario.
+- `cogs/core.py` — trava de servidor, status rotativo, backup diario e `/status`.
+- `cogs/linkfix.py` — conversor de links quebrados (Twitter/Instagram/TikTok).
 
 ## Funcionalidades
 
@@ -51,6 +52,8 @@ compartilhada em modulos de nivel superior:
 - Sabe a data/hora atual (Brasilia) em todo pedido, pra nao "alucinar" datas/dias da semana.
 - Botoes de feedback (👍/👎) em respostas de chat, pesquisa e noticias, que alimentam o
   resumo de perfil da pessoa que clicou.
+- `/resumo [mensagens]`: resume as ultimas mensagens do canal atual (10-100, padrao 50) em
+  tom informal/fofoqueiro, usando so o historico real salvo no SQLite.
 
 ### Pesquisa
 - `/pesquisa <termo>`: busca real na web (minimo 5 fontes via DuckDuckGo), resume com a IA
@@ -95,6 +98,14 @@ compartilhada em modulos de nivel superior:
 ### Status
 - O status/atividade do bot roda a cada 30 minutos entre frases como "Fazendo automod",
   "Pesquisando clima", "Investigando noticias", etc.
+- `/status`: uptime, latencia com o Discord, saude da API do Open-Meteo (ping) e contagem
+  de mensagens/perfis salvos no banco.
+
+### Qualidade de vida
+- **Conversor de links**: mensagens com links do Twitter/X, Instagram (post/reel) ou TikTok
+  recebem automaticamente uma versao corrigida (`fxtwitter.com`, `ddinstagram.com`,
+  `vxtiktok.com`) que embeda corretamente no Discord, e a mensagem original tem o embed
+  quebrado suprimido (quando o bot tem permissao de Gerenciar Mensagens no canal).
 
 ### Infraestrutura e confiabilidade
 - **Backup diario** do banco SQLite (3h da manha, horario de Brasilia), com retencao de
@@ -133,6 +144,16 @@ O bot tem permissoes amplas (cargos, canais, kick, ban) porque os comandos
 administrativos passam por essas APIs — mas cada comando sensivel valida
 `interaction.user.id == OWNER_USER_ID` antes de executar. Ninguem alem do dono
 consegue de fato usar esses comandos, mesmo tendo acesso ao servidor.
+
+## Testes
+
+Testes unitarios cobrem so as funcoes puras/deterministicas (cache TTL do clima,
+normalizacao de texto, deteccao de gatilhos de busca, conversor de links etc.):
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
 
 ## Fontes de dados externas
 

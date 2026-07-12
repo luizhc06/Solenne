@@ -80,6 +80,26 @@ def load_recent_history(channel_id: int, limit: int = 20) -> list[dict]:
     return messages
 
 
+def load_user_messages(channel_id: int, limit: int = 50) -> list[dict]:
+    """So mensagens de usuarios (sem as respostas da propria Solenne) pro /resumo."""
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT author_name, content FROM chat_history "
+            "WHERE channel_id = ? AND role = 'user' "
+            "ORDER BY id DESC LIMIT ?",
+            (channel_id, limit),
+        ).fetchall()
+    rows.reverse()
+    return [{"author": author, "content": content} for author, content in rows]
+
+
+def get_db_stats() -> dict:
+    with db_conn() as conn:
+        messages = conn.execute("SELECT COUNT(*) FROM chat_history").fetchone()[0]
+        profiles = conn.execute("SELECT COUNT(*) FROM user_profiles").fetchone()[0]
+    return {"messages": messages, "profiles": profiles}
+
+
 def get_user_summary(user_id: int) -> str:
     with db_conn() as conn:
         row = conn.execute(

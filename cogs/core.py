@@ -1,12 +1,15 @@
+import time
 import asyncio
 import logging
-from datetime import datetime, time as dtime
+from datetime import datetime, timezone, time as dtime
 
+import httpx
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from config import ALLOWED_GUILD_ID, NEWS_TIMEZONE
-from db import backup_database_sync
+from db import backup_database_sync, get_db_stats
 from notify import notify_owner_text
 
 log = logging.getLogger("hermes-bot")
@@ -23,12 +26,29 @@ STATUS_MESSAGES = [
 STATUS_ROTATE_MINUTES = 30
 BACKUP_TIME = dtime(hour=3, minute=0, tzinfo=NEWS_TIMEZONE)
 
+API_HEALTH_URL = "https://geocoding-api.open-meteo.com/v1/search?name=London"
+API_HEALTH_TIMEOUT_SECONDS = 1.5
+
+
+async def _check_api_health() -> str:
+    async with httpx.AsyncClient() as client:
+        try:
+            start = time.monotonic()
+            resp = await client.get(API_HEALTH_URL, timeout=API_HEALTH_TIMEOUT_SECONDS)
+            latency_ms = (time.monotonic() - start) * 1000
+            if resp.status_code == 200:
+                return f"🟢 Online ({latency_ms:.0f}ms)"
+            return "🟡 Instavel"
+        except Exception:
+            return "🔴 Offline"
+
 
 class CoreCog(commands.Cog):
     """Eventos/tarefas de infraestrutura: trava de servidor, status rotativo e backup."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.bot.start_time = time.time()
         self.rotate_status_task.start()
         self.daily_backup_task.start()
 
@@ -91,6 +111,37 @@ class CoreCog(commands.Cog):
                 f"{inviter_text}",
             )
             await guild.leave()
+
+    @app_commands.command(name="status", description="Mostra uptime, latencia e saude da Solenne")
+    async def status(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        loop = asyncio.get_event_loop()
+
+        uptime_seconds = int(time.time() - self.bot.start_time)
+        days, remainder = divmod(uptime_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+        uptime_str = f"{days}d {hours}h {minutes}m"
+
+        db_info = await loop.run_in_executor(None, get_db_stats)
+        api_health = await _check_api_health()
+
+        embed = discord.Embed(
+            title="📊 Telemetria da Solenne",
+            color=discord.Color.dark_grey(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+        embed.add_field(name="⏱️ Uptime", value=f"`{uptime_str}`", inline=True)
+        embed.add_field(name="⚡ Latencia Discord", value=f"`{self.bot.latency * 1000:.0f}ms`", inline=True)
+        embed.add_field(name="🗺️ Open-Meteo API", value=api_health, inline=True)
+        embed.add_field(
+            name="💾 Banco de dados (SQLite)",
+            value=f"• Mensagens salvas: `{db_info['messages']}`\n• Perfis mapeados: `{db_info['profiles']}`",
+            inline=False,
+        )
+        embed.set_footer(text="Solenne - VM.Standard.E2.1.Micro")
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):
