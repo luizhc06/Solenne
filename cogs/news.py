@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from config import ALLOWED_GUILD_ID, NEWS_TIMEZONE
+from config import ALLOWED_GUILD_ID, NEWS_TIMEZONE, ANILIST_USERNAME
 from db import filter_unposted_links, mark_news_posted
 from ai_client import ai_lock, _complete
 from utils import thinking_embed, NEWS_THINKING_ETA_SECONDS, TTLCache
@@ -23,9 +23,19 @@ NEWS_CHANNEL_NAME = "noticias"
 NEWS_POST_TIME = dtime(hour=12, minute=0, tzinfo=NEWS_TIMEZONE)
 NEWS_LOOKBACK_HOURS = 30
 NEWS_ITEMS_PER_CATEGORY = 4
+# Quantos candidatos a IA recebe pra escolher. Precisa ser bem maior que
+# NEWS_ITEMS_PER_CATEGORY, senao ela nao tem de onde escolher e o "mais relevante"
+# vira so "os primeiros do feed".
+NEWS_CANDIDATES_PER_CATEGORY = NEWS_ITEMS_PER_CATEGORY * 3
+
+# feedparser.parse(url) baixa por conta propria, com socket sem timeout - um feed
+# lento pendura a thread do executor e trava o digest inteiro. Baixamos com httpx
+# (que tem timeout) e entregamos os bytes ja prontos pro feedparser.
+FEED_TIMEOUT_SECONDS = 12
+FEED_USER_AGENT = "Mozilla/5.0 (compatible; SolenneBot/1.0; +https://github.com/luizhc06/Solenne)"
 
 # Personalizacao da categoria "geek" com base no perfil de anime do dono no AniList.
-ANILIST_USERNAME = "Rizuw"
+# O usuario vem do config (env ANILIST_USERNAME), compartilhado com cogs/anime.py.
 ANILIST_API_URL = "https://graphql.anilist.co"
 ANILIST_CACHE_TTL_SECONDS = 12 * 60 * 60  # perfil nao muda de hora em hora
 ANILIST_MIN_SCORE_FOR_HIGHLIGHT = 7
@@ -133,17 +143,23 @@ NEWS_CATEGORIES = {
     "ia": {
         "label": "🤖 Inteligencia Artificial",
         "color": discord.Color.purple(),
+        # O feed venturebeat.com/category/ai congelou em maio/2026 (mesmo caso do antigo
+        # G1 Brasil: responde 200, mas so com materia velha). Trocado por TechCrunch AI.
         "feeds": [
             ("MIT Technology Review", "https://www.technologyreview.com/feed/"),
-            ("VentureBeat AI", "https://venturebeat.com/category/ai/feed/"),
+            ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
         ],
     },
     "brasil": {
         "label": "🇧🇷 Brasil",
         "color": discord.Color.gold(),
+        # ATENCAO: o antigo feed "dynamo/brasil/rss2.xml" responde 200 mas esta
+        # congelado desde maio/2023 - todo item caia fora do cutoff e a categoria
+        # Brasil virava 100% politica. Se o Brasil sumir de novo, checar a data do
+        # item mais recente do feed antes de suspeitar do resto do pipeline.
         "feeds": [
-            ("G1 Brasil", "https://g1.globo.com/dynamo/brasil/rss2.xml"),
-            ("G1 Politica", "https://g1.globo.com/dynamo/politica/rss2.xml"),
+            ("G1", "https://g1.globo.com/rss/g1/"),
+            ("G1 Politica", "https://g1.globo.com/rss/g1/politica/"),
         ],
     },
     "mundo": {
@@ -162,13 +178,27 @@ TAG_RE = re.compile(r"<[^<]+?>")
 def _fetch_feed_entries(name: str, url: str, cutoff: datetime) -> list[dict]:
     entries = []
     try:
-        parsed = feedparser.parse(url)
+        resp = httpx.get(
+            url,
+            timeout=FEED_TIMEOUT_SECONDS,
+            follow_redirects=True,
+            headers={"User-Agent": FEED_USER_AGENT},
+        )
+        resp.raise_for_status()
+        parsed = feedparser.parse(resp.content)
     except Exception:
-        log.exception("Erro ao buscar feed %s", name)
+        log.exception("Erro ao buscar feed %s (%s)", name, url)
+        return entries
+
+    if not parsed.entries:
+        log.warning("Feed %s (%s) respondeu sem nenhuma entrada.", name, url)
         return entries
 
     for entry in parsed.entries[:10]:
         published = entry.get("published_parsed") or entry.get("updated_parsed")
+        # Sem data: mantem o item (alguns feeds nao datam), mas ele fica no fim da
+        # ordenacao por recencia em vez de disputar as primeiras posicoes.
+        published_dt = None
         if published:
             published_dt = datetime(*published[:6], tzinfo=timezone.utc)
             if published_dt < cutoff:
@@ -200,16 +230,37 @@ def _fetch_feed_entries(name: str, url: str, cutoff: datetime) -> list[dict]:
                 "summary": summary,
                 "source": name,
                 "image": img,
+                "published": published_dt,
             }
         )
     return entries
 
 
+def interleave_by_source(per_feed: list[list[dict]]) -> list[dict]:
+    """Intercala as listas de cada fonte em rodizio (1 de cada, repetindo), com cada
+    fonte ja ordenada da mais recente pra mais antiga.
+
+    Antes isso era um `extend` sequencial seguido de um corte no fim: como cada feed
+    devolve ate 10 itens e o corte era em 8, a SEGUNDA fonte de cada categoria era
+    descartada inteira antes da IA sequer ver. Rodizio garante que toda fonte
+    configurada aparece na disputa.
+    """
+    ordered = [
+        sorted(items, key=lambda it: it.get("published") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        for items in per_feed
+    ]
+    merged = []
+    for i in range(max((len(items) for items in ordered), default=0)):
+        for items in ordered:
+            if i < len(items):
+                merged.append(items[i])
+    return merged
+
+
 def _collect_category_items(category: dict) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=NEWS_LOOKBACK_HOURS)
-    items = []
-    for name, url in category["feeds"]:
-        items.extend(_fetch_feed_entries(name, url, cutoff))
+    per_feed = [_fetch_feed_entries(name, url, cutoff) for name, url in category["feeds"]]
+    items = interleave_by_source(per_feed)
 
     # Descarta noticias que ja foram mostradas recentemente (mesmo link), pra nao
     # repetir quando /noticias manual e o post automatico caem no mesmo dia.
@@ -221,7 +272,7 @@ def _collect_category_items(category: dict) -> list[dict]:
             seen.add(it["link"])
             deduped.append(it)
 
-    return deduped[: NEWS_ITEMS_PER_CATEGORY * 2]
+    return deduped[:NEWS_CANDIDATES_PER_CATEGORY]
 
 
 NEWS_SUMMARY_PROMPT = """Voce recebeu uma lista de noticias reais (titulo + resumo original, podem estar
@@ -333,24 +384,41 @@ async def build_news_intro() -> str:
     return intro or random.choice(NEWS_INTRO_FALLBACKS)
 
 
-async def build_news_digest() -> list[tuple[dict, list[discord.Embed]]]:
+async def build_news_digest() -> tuple[list[tuple[dict, list[discord.Embed]]], list[str]]:
+    """Retorna as secoes prontas e os rotulos das categorias que ficaram de fora.
+
+    Cada categoria e isolada em try/except de proposito: antes, um erro em uma
+    (feed fora do ar, banco travado, timeout da NVIDIA) derrubava a geracao inteira
+    e o digest chegava truncado sem explicacao nenhuma.
+    """
     loop = asyncio.get_event_loop()
     sections = []
+    skipped = []
     for key, category in NEWS_CATEGORIES.items():
-        raw_items = await loop.run_in_executor(None, _collect_category_items, category)
-        interest_hint = ""
-        if key == "geek":
-            interest_hint = await loop.run_in_executor(None, _fetch_anilist_interest_sync)
-        # So a chamada de IA fica dentro do lock global - o post automatico e um
-        # /noticias manual rodando ao mesmo tempo nao devem martelar a API da NVIDIA
-        # em paralelo (isso agrava 504s la e ja causou digest incompleto).
-        async with ai_lock:
-            curated = await _summarize_category(raw_items, interest_hint)
+        try:
+            raw_items = await loop.run_in_executor(None, _collect_category_items, category)
+            interest_hint = ""
+            if key == "geek":
+                interest_hint = await loop.run_in_executor(None, _fetch_anilist_interest_sync)
+            # So a chamada de IA fica dentro do lock global - o post automatico e um
+            # /noticias manual rodando ao mesmo tempo nao devem martelar a API da NVIDIA
+            # em paralelo (isso agrava 504s la e ja causou digest incompleto).
+            async with ai_lock:
+                curated = await _summarize_category(raw_items, interest_hint)
+        except Exception:
+            log.exception("Erro ao montar a categoria %s", category["label"])
+            skipped.append(category["label"])
+            continue
+
         embeds = [build_item_embed(category, item) for item in curated]
-        if embeds:
-            sections.append((category, embeds))
-            await loop.run_in_executor(None, mark_news_posted, [it["link"] for it in curated])
-    return sections
+        if not embeds:
+            log.warning("Categoria %s ficou sem nenhum item.", category["label"])
+            skipped.append(category["label"])
+            continue
+
+        sections.append((category, embeds))
+        await loop.run_in_executor(None, mark_news_posted, [it["link"] for it in curated])
+    return sections, skipped
 
 
 def find_news_channel(guild: discord.Guild) -> discord.TextChannel | None:
@@ -366,7 +434,7 @@ async def post_news_digest(channel: discord.TextChannel):
             "📰 Buscando e resumindo as noticias do dia...", eta_seconds=NEWS_THINKING_ETA_SECONDS
         )
     )
-    sections = await build_news_digest()
+    sections, skipped = await build_news_digest()
     if not sections:
         await placeholder.edit(
             content="Nao encontrei noticias relevantes nas ultimas horas, tento de novo mais tarde.",
@@ -389,6 +457,11 @@ async def post_news_digest(channel: discord.TextChannel):
         except discord.HTTPException:
             log.exception("Erro ao enviar embeds da categoria %s", category["label"])
             await channel.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
+
+    # Diz o que faltou em vez de simplesmente omitir - categoria sumindo em silencio
+    # e indistinguivel de "nao teve noticia hoje" pra quem esta lendo.
+    if skipped:
+        await channel.send(f"-# Sem novidade em: {', '.join(skipped)}.")
 
 
 class NewsCog(commands.Cog):
