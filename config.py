@@ -17,6 +17,7 @@ class AppConfig:
     owner_user_id: int
     model: str = "openai/gpt-oss-120b"
     db_path: str = "/app/data/solenne.db"
+    refinement_rounds: int = 1
     anilist_username: str = "Rizuw"
 
     @classmethod
@@ -28,6 +29,7 @@ class AppConfig:
             owner_user_id=int(os.environ["OWNER_USER_ID"]),
             model=os.environ.get("HERMES_MODEL", "openai/gpt-oss-120b"),
             db_path=os.environ.get("DB_PATH", "/app/data/solenne.db"),
+            refinement_rounds=int(os.environ.get("REFINEMENT_ROUNDS", "1")),
             anilist_username=os.environ.get("ANILIST_USERNAME", "Rizuw"),
         )
 
@@ -42,6 +44,7 @@ MODEL = _cfg.model
 ALLOWED_GUILD_ID = _cfg.allowed_guild_id
 OWNER_USER_ID = _cfg.owner_user_id
 DB_PATH = _cfg.db_path
+REFINEMENT_ROUNDS = _cfg.refinement_rounds
 ANILIST_USERNAME = _cfg.anilist_username
 HISTORY_WINDOW = 20
 

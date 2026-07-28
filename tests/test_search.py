@@ -7,9 +7,13 @@ def test_wants_web_search_matches_pesquisa_variants():
     assert wants_web_search("PESQUISE agora") is True
 
 
-def test_wants_web_search_matches_busca_and_procura_variants():
-    assert wants_web_search("busca ai quanto custa") is True
-    assert wants_web_search("procura sobre o assunto") is True
+def test_wants_web_search_ignores_busca_and_procura():
+    """"buscar"/"procurar" sao palavras do dia a dia - disparar busca web nelas fazia
+    conversa normal virar pesquisa sem querer. O gatilho e restrito a "pesquis-" de
+    proposito (regressao introduzida na refatoracao em Cogs, ver commit 5432f0f)."""
+    assert wants_web_search("busca ai quanto custa") is False
+    assert wants_web_search("to procurando um jogo bom") is False
+    assert wants_web_search("fui buscar meu irmao na escola") is False
 
 
 def test_wants_web_search_ignores_unrelated_text():

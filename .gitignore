@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 data/
+.pytest_cache/
+# Arquivo de anotacao de credenciais que ja apareceu solto no diretorio do projeto -
+# sem essa linha, um `git add .` distraido publica token do bot e chave da NVIDIA.
+credenciais.txt

@@ -98,7 +98,7 @@ def build_search_embed(results: list[dict]) -> discord.Embed:
 # (pesquise, pesquisa, pesquisar) de proposito, pra nao disparar em palavras do
 # dia a dia tipo "buscar"/"procurar" e evitar estourar contexto/armazenamento
 # com buscas nao intencionais.
-SEARCH_TRIGGER_RE = re.compile(r"\b(pesquis\w*|busc\w*|procur\w*)\b", re.IGNORECASE)
+SEARCH_TRIGGER_RE = re.compile(r"\bpesquis\w*\b", re.IGNORECASE)
 
 
 def wants_web_search(content: str) -> bool:

@@ -3,7 +3,7 @@ import logging
 
 from openai import AsyncOpenAI
 
-from config import NVIDIA_API_KEY, MODEL
+from config import NVIDIA_API_KEY, MODEL, REFINEMENT_ROUNDS
 
 log = logging.getLogger("hermes-bot")
 
@@ -13,7 +13,11 @@ client_ai = AsyncOpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=
 # quando varias pessoas usam comandos ao mesmo tempo.
 ai_lock = asyncio.Lock()
 
-REFINEMENT_ROUNDS = 3  # rascunho + N refinos + humanizacao = 5 passadas no total
+# rascunho + REFINEMENT_ROUNDS refinos + humanizacao = REFINEMENT_ROUNDS + 2 chamadas
+# sequenciais por resposta. Estava em 3 (5 chamadas), o que segurava o ai_lock global
+# por muito tempo, fazia todo mundo esperar na fila e multiplicava a chance de pegar
+# um 504 da NVIDIA no meio. Ajustavel por env (REFINEMENT_ROUNDS) se quiser trocar
+# velocidade por polimento.
 
 CRITIQUE_PROMPT = (
     "Releia sua resposta anterior com espirito critico, como se fosse outra pessoa "

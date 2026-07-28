@@ -37,8 +37,11 @@ compartilhada em modulos de nivel superior:
 
 ### Chat com IA
 - `/ask <pergunta>` ou mencionar o bot: conversa via modelo `openai/gpt-oss-120b` na API
-  da NVIDIA, com persona propria (ver `SYSTEM_PROMPT` em `bot.py`) e raciocinio em multiplas
-  passadas (rascunho, autocritica/refino e humanizacao) antes de responder.
+  da NVIDIA, com persona propria (ver `SYSTEM_PROMPT` em `cogs/chat.py`) e raciocinio em
+  multiplas passadas (rascunho, autocritica/refino e humanizacao) antes de responder.
+  Sao `REFINEMENT_ROUNDS + 2` chamadas sequenciais por resposta, todas segurando o lock
+  global — por isso o padrao caiu de 3 refinos (5 chamadas) pra 1 (3 chamadas): a fila
+  andava devagar e cada chamada extra era mais uma chance de 504 da NVIDIA no meio.
 - **Modo ambiente**: em canais especificos (`geral`, `comidas`, `bot`, `videojogos-geral`),
   o bot responde perguntas sem precisar ser mencionado, com cooldown de 3 minutos por canal
   para nao estourar o limite de requisicoes da API.
@@ -144,6 +147,7 @@ Ver `.env.example`. Copie para `.env` e preencha:
 | `HERMES_MODEL` | Modelo usado no NIM (padrao: `openai/gpt-oss-120b`) |
 | `ALLOWED_GUILD_ID` | ID do unico servidor onde o bot pode ficar |
 | `OWNER_USER_ID` | Seu ID de usuario no Discord (dono, recebe DMs de moderacao/seguranca) |
+| `REFINEMENT_ROUNDS` | Passadas de refino por resposta (padrao `1`, total = valor + 2 chamadas) |
 | `ANILIST_USERNAME` | Perfil publico do AniList usado na curadoria de noticias geek (padrao `Rizuw`) |
 
 ## Deploy
