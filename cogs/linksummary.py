@@ -1,0 +1,159 @@
+import re
+import html
+import socket
+import asyncio
+import logging
+import ipaddress
+import urllib.parse
+
+import httpx
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from ai_client import ai_lock, _complete
+from utils import thinking_embed
+from views import FeedbackView
+
+log = logging.getLogger("hermes-bot")
+
+FETCH_TIMEOUT_SECONDS = 15
+FETCH_MAX_BYTES = 2_000_000
+# Quanto texto da pagina vai pro modelo. Passar a pagina inteira estoura o contexto
+# e nao melhora o resumo - o comeco de um artigo ja carrega o essencial.
+MAX_TEXT_CHARS = 12_000
+FETCH_USER_AGENT = "Mozilla/5.0 (compatible; SolenneBot/1.0; +https://github.com/luizhc06/Solenne)"
+
+SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b.*?</\1>", re.DOTALL | re.IGNORECASE)
+TAG_RE = re.compile(r"<[^>]+>")
+WHITESPACE_RE = re.compile(r"\s+")
+TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.DOTALL | re.IGNORECASE)
+
+
+class UnsafeURLError(Exception):
+    pass
+
+
+def ensure_public_http_url(url: str):
+    """Recusa qualquer coisa que nao seja http(s) para um IP publico.
+
+    A Solenne roda numa VM da Oracle Cloud, onde 169.254.169.254 serve o endpoint de
+    metadados da instancia. Sem essa checagem, qualquer pessoa do servidor poderia
+    mandar `/resumolink http://169.254.169.254/...` e receber de volta credenciais da
+    VM resumidas num embed. Vale tambem pra 127.0.0.1 e pra rede interna.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise UnsafeURLError("So consigo abrir links http/https.")
+    if not parsed.hostname:
+        raise UnsafeURLError("Esse link nao tem um endereco valido.")
+
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror:
+        raise UnsafeURLError("Nao consegui resolver o endereco desse link.")
+
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise UnsafeURLError("Esse endereco e interno, nao vou abrir.")
+
+
+def extract_text(raw_html: str) -> tuple[str, str]:
+    """Devolve (titulo, texto limpo) a partir do HTML bruto."""
+    title_match = TITLE_RE.search(raw_html)
+    title = html.unescape(TAG_RE.sub("", title_match.group(1))).strip() if title_match else ""
+
+    body = SCRIPT_STYLE_RE.sub(" ", raw_html)
+    text = html.unescape(TAG_RE.sub(" ", body))
+    return title, WHITESPACE_RE.sub(" ", text).strip()
+
+
+def _fetch_page_sync(url: str) -> tuple[str, str]:
+    ensure_public_http_url(url)
+    with httpx.stream(
+        "GET",
+        url,
+        timeout=FETCH_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        headers={"User-Agent": FETCH_USER_AGENT},
+    ) as resp:
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "")
+        if "html" not in content_type and "text" not in content_type:
+            raise UnsafeURLError(f"Esse link nao e uma pagina de texto (e {content_type or 'desconhecido'}).")
+
+        chunks = []
+        total = 0
+        for chunk in resp.iter_bytes():
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= FETCH_MAX_BYTES:
+                break
+        raw = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+
+    return extract_text(raw)
+
+
+LINK_SUMMARY_PROMPT = """Voce recebeu o texto extraido de uma pagina da web. Resuma em portugues,
+baseando-se SOMENTE no que esta no texto - nunca complete com conhecimento proprio nem invente
+detalhes que nao aparecem ali. Se o texto estiver truncado, incompleto ou for so menu/navegacao
+sem conteudo de verdade, diga isso claramente em vez de inventar um resumo.
+
+Formato: um paragrafo curto dizendo do que se trata, seguido de 3 a 5 bullets com os pontos
+principais. Direto, sem floreio. Responda somente com o resumo.
+
+Titulo da pagina: {title}
+URL: {url}
+
+Texto da pagina:
+{text}"""
+
+
+async def summarize_url(url: str) -> tuple[str, str]:
+    loop = asyncio.get_event_loop()
+    title, text = await loop.run_in_executor(None, _fetch_page_sync, url)
+    if len(text) < 200:
+        raise UnsafeURLError("Essa pagina nao tem texto suficiente pra resumir (talvez carregue por JavaScript).")
+
+    prompt = LINK_SUMMARY_PROMPT.format(title=title or "(sem titulo)", url=url, text=text[:MAX_TEXT_CHARS])
+    async with ai_lock:
+        summary = await _complete([{"role": "user", "content": prompt}], temperature=0.4, max_tokens=900)
+    return title, summary
+
+
+class LinkSummaryCog(commands.Cog):
+    @app_commands.command(name="resumolink", description="Abre um link e resume o conteudo da pagina")
+    @app_commands.describe(url="O link que voce quer que eu leia")
+    async def resumolink(self, interaction: discord.Interaction, url: str):
+        await interaction.response.send_message(embed=thinking_embed("🔗 Abrindo e lendo a pagina...", eta_seconds=25))
+
+        try:
+            title, summary = await summarize_url(url.strip())
+        except UnsafeURLError as e:
+            await interaction.edit_original_response(content=str(e), embed=None)
+            return
+        except httpx.HTTPStatusError as e:
+            await interaction.edit_original_response(
+                content=f"A pagina respondeu {e.response.status_code}, nao consegui ler.", embed=None
+            )
+            return
+        except Exception:
+            log.exception("Erro ao resumir link %s", url)
+            await interaction.edit_original_response(
+                content="Deu erro ao abrir esse link, tenta de novo ou confere se ele esta certo.", embed=None
+            )
+            return
+
+        embed = discord.Embed(
+            title=(title or url)[:250],
+            url=url,
+            description=summary[:4000],
+            color=discord.Color.teal(),
+        )
+        embed.set_footer(text="Resumo do conteudo real da pagina")
+        await interaction.edit_original_response(content=None, embed=embed, view=FeedbackView(title[:200] or url))
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(LinkSummaryCog(bot))

@@ -54,6 +54,32 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                delivered INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(delivered, due_at)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS announced_episodes (
+                media_id INTEGER NOT NULL,
+                episode INTEGER NOT NULL,
+                announced_at TEXT NOT NULL,
+                PRIMARY KEY (media_id, episode)
+            )
+            """
+        )
 
 
 def save_message(channel_id: int, role: str, author_name: str | None, content: str):
@@ -149,6 +175,97 @@ def mark_news_posted(links: list[str]):
         # Limpa entradas antigas pra tabela nao crescer pra sempre.
         cutoff = (datetime.now(timezone.utc) - timedelta(days=NEWS_DEDUP_DAYS * 5)).isoformat()
         conn.execute("DELETE FROM posted_news WHERE posted_at < ?", (cutoff,))
+
+
+def add_reminder(user_id: int, channel_id: int, text: str, due_at: datetime) -> int:
+    with db_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO reminders (user_id, channel_id, text, due_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                user_id,
+                channel_id,
+                text,
+                due_at.astimezone(timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        return cur.lastrowid
+
+
+def pop_due_reminders() -> list[dict]:
+    """Marca como entregues e devolve os lembretes ja vencidos.
+
+    Marca na mesma transacao da leitura de proposito: se o envio no Discord falhar
+    depois, o lembrete se perde - preferivel a um loop que reenvia o mesmo lembrete
+    a cada 30s pra sempre porque o canal sumiu.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, user_id, channel_id, text FROM reminders "
+            "WHERE delivered = 0 AND due_at <= ? ORDER BY due_at",
+            (now,),
+        ).fetchall()
+        if rows:
+            conn.executemany(
+                "UPDATE reminders SET delivered = 1 WHERE id = ?", [(r[0],) for r in rows]
+            )
+    return [{"id": r[0], "user_id": r[1], "channel_id": r[2], "text": r[3]} for r in rows]
+
+
+def list_reminders(user_id: int) -> list[dict]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, text, due_at FROM reminders "
+            "WHERE user_id = ? AND delivered = 0 ORDER BY due_at",
+            (user_id,),
+        ).fetchall()
+    return [
+        {"id": r[0], "text": r[1], "due_at": datetime.fromisoformat(r[2])} for r in rows
+    ]
+
+
+def delete_reminder(reminder_id: int, user_id: int) -> bool:
+    """So apaga se o lembrete for da propria pessoa - o id e sequencial e visivel,
+    entao sem esse filtro qualquer um cancelaria lembrete dos outros."""
+    with db_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM reminders WHERE id = ? AND user_id = ? AND delivered = 0",
+            (reminder_id, user_id),
+        )
+        return cur.rowcount > 0
+
+
+def has_announced_any_episode() -> bool:
+    """Se a tabela esta vazia, o radar de anime nunca rodou - o chamador usa isso pra
+    semear o estado atual em silencio em vez de anunciar episodios antigos como novos."""
+    with db_conn() as conn:
+        return conn.execute("SELECT 1 FROM announced_episodes LIMIT 1").fetchone() is not None
+
+
+def filter_unannounced_episodes(pairs: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Dos pares (media_id, episodio) recebidos, devolve os que ainda nao foram anunciados."""
+    if not pairs:
+        return []
+    with db_conn() as conn:
+        rows = conn.execute("SELECT media_id, episode FROM announced_episodes").fetchall()
+    already = {(r[0], r[1]) for r in rows}
+    return [p for p in pairs if p not in already]
+
+
+def mark_episodes_announced(pairs: list[tuple[int, int]]):
+    if not pairs:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with db_conn() as conn:
+        conn.executemany(
+            "INSERT INTO announced_episodes (media_id, episode, announced_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(media_id, episode) DO NOTHING",
+            [(media_id, episode, now) for media_id, episode in pairs],
+        )
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        conn.execute("DELETE FROM announced_episodes WHERE announced_at < ?", (cutoff,))
 
 
 def backup_database_sync():
