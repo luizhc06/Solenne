@@ -14,6 +14,9 @@ EXTENSIONS = [
     "cogs.news",
     "cogs.admin",
     "cogs.linkfix",
+    "cogs.linksummary",
+    "cogs.reminders",
+    "cogs.anime",
 ]
 
 

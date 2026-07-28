@@ -32,6 +32,9 @@ compartilhada em modulos de nivel superior:
 - `cogs/admin.py` — comandos restritos ao dono (`/kick`, `/perturbar`, `/clear`, etc.).
 - `cogs/core.py` — trava de servidor, status rotativo, backup diario e `/status`.
 - `cogs/linkfix.py` — conversor de links quebrados (Twitter/Instagram/TikTok).
+- `cogs/linksummary.py` — `/resumolink`: abre uma pagina e resume o conteudo real dela.
+- `cogs/reminders.py` — `/lembrete`, `/lembretes`, `/cancelarlembrete` e o loop de entrega.
+- `cogs/anime.py` — `/anime` e o radar de episodios novos via AniList.
 
 ## Funcionalidades
 
@@ -65,6 +68,25 @@ compartilhada em modulos de nivel superior:
   modo ambiente dispara essa mesma busca em vez de responder de memoria. Restrito de
   proposito a variacoes de "pesquis-" (nao "buscar"/"procurar", de uso comum do dia a dia)
   pra nao disparar buscas sem querer.
+- `/resumolink <url>`: abre a pagina, extrai o texto real e resume em um paragrafo + bullets.
+  So aceita http/https apontando pra IP publico — endereco interno (`127.0.0.1`, rede local,
+  e principalmente o `169.254.169.254` de metadados da VM na Oracle) e recusado, senao
+  qualquer pessoa do servidor poderia extrair credenciais da maquina por ai.
+
+### Lembretes
+- `/lembrete <quando> <o que>`: aceita duracao (`30m`, `2h`, `1h30m`, `3 dias`), dia nomeado
+  (`amanha as 9h`, `hoje as 18:30`), data (`25/12 10:00`, `25/12/2027 10:00`) e horario (`18:30`).
+- Desambiguacao: `9h` sozinho e *duracao* (daqui a 9 horas); `as 9h` e *horario* (9 da manha).
+- `/lembretes` lista os pendentes, `/cancelarlembrete <id>` cancela (so os seus).
+- O loop verifica a cada 30s e entrega no canal onde o lembrete foi criado, marcando como
+  entregue na mesma transacao da leitura (nao reenvia pra sempre se o canal sumir).
+
+### Anime
+- `/anime`: proximos episodios das series marcadas como "assistindo" no AniList do dono,
+  com contagem regressiva renderizada no fuso de quem le.
+- Radar automatico (a cada 30 min): avisa no canal quando sai episodio novo dessas series.
+  Na primeira execucao ele so registra o estado atual, sem anunciar — senao despejaria de
+  uma vez o ultimo episodio de tudo que esta sendo acompanhado.
 
 ### Noticias
 - `/noticias`: resumo sob demanda, ou automatico todo dia ao meio-dia (horario de Brasilia)
@@ -148,7 +170,7 @@ Ver `.env.example`. Copie para `.env` e preencha:
 | `ALLOWED_GUILD_ID` | ID do unico servidor onde o bot pode ficar |
 | `OWNER_USER_ID` | Seu ID de usuario no Discord (dono, recebe DMs de moderacao/seguranca) |
 | `REFINEMENT_ROUNDS` | Passadas de refino por resposta (padrao `1`, total = valor + 2 chamadas) |
-| `ANILIST_USERNAME` | Perfil publico do AniList usado na curadoria de noticias geek (padrao `Rizuw`) |
+| `ANILIST_USERNAME` | Perfil publico do AniList usado nas noticias geek e no radar de anime (padrao `Rizuw`) |
 
 ## Deploy
 

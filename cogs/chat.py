@@ -59,20 +59,28 @@ Tom e formato:
   de um jeito engracado em vez de seco).
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
-- Comandos que voce realmente tem: /help, /ask, /resumo, /pesquisa, /noticias, /clima, /status,
-  /kick, /addrole, /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear.
+- Comandos que voce realmente tem: /help, /ask, /resumo, /pesquisa, /resumolink, /noticias,
+  /clima, /status, /lembrete, /lembretes, /cancelarlembrete, /anime, /kick, /addrole,
+  /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear.
 - /clima mostra o clima atual (real, via Open-Meteo) e alertas oficiais de Defesa Civil/INMET.
 - /pesquisa faz busca real na web (minimo 5 fontes) e resume com links das fontes.
+- /resumolink abre um link que a pessoa mandar e resume o conteudo real da pagina.
 - /resumo resume as ultimas mensagens do canal atual (fofoca do que rolou).
 - /status mostra uptime, latencia e saude da Solenne.
-- Voce NAO tem: lembretes/agenda, busca na Wikipedia, calculadora, nem qualquer outro
-  comando que nao esteja na lista acima.
+- /lembrete marca um lembrete pra depois (ex: "30m", "amanha as 9h", "25/12 10:00"), /lembretes
+  lista os pendentes e /cancelarlembrete cancela um. Se alguem pedir pra voce lembrar de algo
+  em conversa livre, sugira usar /lembrete - voce so lembra de verdade pelo comando, nunca
+  prometa lembrar de algo so porque pediram no chat.
+- /anime mostra os proximos episodios das series que o Rizu acompanha no AniList. Voce tambem
+  avisa sozinha no canal quando sai episodio novo dessas series.
+- Voce NAO tem: busca na Wikipedia, calculadora, nem qualquer outro comando que nao esteja
+  na lista acima.
 - Se alguem perguntar sobre seus comandos, liste APENAS os reais (ou sugira usar /help).
-- Se alguem pedir algo que voce nao sabe fazer de verdade (lembretes, calculadora,
-  busca na Wikipedia, etc. - fora da lista de comandos acima), diga claramente que
-  ainda nao tem essa funcionalidade. Para clima, sempre sugira usar /clima em vez
-  de responder de cabeca. Nunca finja ter uma capacidade que nao existe nem responda com
-  informacao inventada se passando por dado real (tipo previsao do tempo "generica").
+- Se alguem pedir algo que voce nao sabe fazer de verdade (calculadora, busca na Wikipedia,
+  etc. - fora da lista de comandos acima), diga claramente que ainda nao tem essa
+  funcionalidade. Para clima, sempre sugira usar /clima em vez de responder de cabeca.
+  Nunca finja ter uma capacidade que nao existe nem responda com informacao inventada se
+  passando por dado real (tipo previsao do tempo "generica").
 """
 
 
@@ -256,8 +264,27 @@ class ChatCog(commands.Cog):
             value=(
                 "`/pesquisa <termo>` — pesquisa na web (minimo 5 fontes reais) e resume com "
                 "os links de onde tirei cada informacao.\n"
+                "`/resumolink <url>` — abro o link e resumo o conteudo real da pagina.\n"
                 "Se voce falar \"pesquise\"/\"pesquisa\" mencionando ou no modo ambiente, eu "
                 "busco na web automaticamente em vez de responder de memoria."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="⏰ Lembretes",
+            value=(
+                "`/lembrete <quando> <o que>` — ex: `30m`, `2h`, `amanha as 9h`, `25/12 10:00`\n"
+                "-# `9h` = daqui a 9 horas; `as 9h` = as 9 da manha.\n"
+                "`/lembretes` — seus lembretes pendentes\n"
+                "`/cancelarlembrete <id>` — cancela um deles"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="📺 Anime",
+            value=(
+                "`/anime` — proximos episodios das series que o Rizu acompanha no AniList.\n"
+                "Aviso sozinha no canal quando sai episodio novo."
             ),
             inline=False,
         )
