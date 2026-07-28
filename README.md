@@ -67,8 +67,21 @@ compartilhada em modulos de nivel superior:
 - `/noticias`: resumo sob demanda, ou automatico todo dia ao meio-dia (horario de Brasilia)
   em um canal com "noticias" no nome. Divisorias por categoria usam heading (`#`) do Discord.
 - Fontes reais via RSS (nunca inventadas): Geek & Anime (Anime News Network, MyAnimeList),
-  Tecnologia & Hardware (Tom's Hardware, Wccftech), Ciencia, Inteligencia Artificial,
-  Brasil (G1) e Mundo/Geopolitica (BBC, Al Jazeera).
+  Tecnologia & Hardware (Tom's Hardware, Wccftech), Ciencia (ScienceDaily, Nature),
+  Inteligencia Artificial (MIT Tech Review, TechCrunch AI), Brasil (G1, G1 Politica) e
+  Mundo/Geopolitica (BBC, Al Jazeera).
+- **Feed que "morre calado" e um risco recorrente aqui**: um veiculo aposenta a URL mas ela
+  continua respondendo 200 com materia velha, entao nada falha — a categoria so fica pobre.
+  Ja aconteceu com `g1.globo.com/dynamo/brasil` (parou em mai/2023) e com
+  `venturebeat.com/category/ai` (parou em mai/2026). Se uma categoria empobrecer, cheque
+  primeiro a data do item mais recente de cada feed dela.
+- **Rodizio entre fontes**: os feeds de cada categoria sao intercalados (1 de cada, por
+  recencia) antes do corte de candidatos. Concatenar e cortar no fim, como era antes,
+  fazia a SEGUNDA fonte de cada categoria ser descartada inteira antes da IA ve-la.
+- **Timeout nos feeds** (12s, via httpx): `feedparser.parse(url)` baixa com socket sem
+  timeout, e um feed lento pendurava a thread e travava o digest todo.
+- Categoria que falha ou fica vazia e reportada no fim do post em vez de sumir calada,
+  e um erro numa categoria nao derruba mais as outras.
 - Titulo e resumo traduzidos/resumidos para PT-BR pela IA a partir do texto real do feed,
   com link da fonte original sempre presente.
 - **Personalizacao da categoria Geek & Anime**: busca o perfil publico do dono no
@@ -131,6 +144,7 @@ Ver `.env.example`. Copie para `.env` e preencha:
 | `HERMES_MODEL` | Modelo usado no NIM (padrao: `openai/gpt-oss-120b`) |
 | `ALLOWED_GUILD_ID` | ID do unico servidor onde o bot pode ficar |
 | `OWNER_USER_ID` | Seu ID de usuario no Discord (dono, recebe DMs de moderacao/seguranca) |
+| `ANILIST_USERNAME` | Perfil publico do AniList usado na curadoria de noticias geek (padrao `Rizuw`) |
 
 ## Deploy
 
@@ -169,5 +183,5 @@ Nenhuma dessas exige API key:
 - [Open-Meteo](https://open-meteo.com/) — geocodificacao e previsao do tempo
 - [INMET](https://apiprevmet3.inmet.gov.br/) — alertas meteorologicos oficiais (Defesa Civil)
 - Feeds RSS publicos (The Verge, Ars Technica, ScienceDaily, Nature, MIT Technology Review,
-  VentureBeat, G1, BBC, Al Jazeera)
+  TechCrunch, G1, BBC, Al Jazeera)
 - DuckDuckGo (busca web para `/pesquisa`)
