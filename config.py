@@ -15,7 +15,7 @@ class AppConfig:
     discord_token: str
     allowed_guild_id: int
     owner_user_id: int
-    model: str = "openai/gpt-oss-120b"
+    model: str = "nvidia/nemotron-3-super-120b-a12b"
     db_path: str = "/app/data/solenne.db"
     refinement_rounds: int = 1
     anilist_username: str = "Rizuw"
@@ -27,7 +27,12 @@ class AppConfig:
             discord_token=os.environ["DISCORD_TOKEN"],
             allowed_guild_id=int(os.environ["ALLOWED_GUILD_ID"]),
             owner_user_id=int(os.environ["OWNER_USER_ID"]),
-            model=os.environ.get("HERMES_MODEL", "openai/gpt-oss-120b"),
+            # Trocado de openai/gpt-oss-120b (jul/2026): o Nemotron 3 Super tem 12B
+            # parametros ativos contra ~5B do gpt-oss, mas 2.2x a vazao dele e supera
+            # ele nos benchmarks da classe - e sendo modelo da propria NVIDIA, tende a
+            # ser melhor servido no NIM. Motivo da troca foi latencia: o chat faz
+            # REFINEMENT_ROUNDS + 2 chamadas sequenciais por resposta.
+            model=os.environ.get("HERMES_MODEL", "nvidia/nemotron-3-super-120b-a12b"),
             db_path=os.environ.get("DB_PATH", "/app/data/solenne.db"),
             refinement_rounds=int(os.environ.get("REFINEMENT_ROUNDS", "1")),
             anilist_username=os.environ.get("ANILIST_USERNAME", "Rizuw"),

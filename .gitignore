@@ -7,3 +7,7 @@ data/
 # Arquivo de anotacao de credenciais que ja apareceu solto no diretorio do projeto -
 # sem essa linha, um `git add .` distraido publica token do bot e chave da NVIDIA.
 credenciais.txt
+# Scripts locais de apoio (ex: comparador de modelos do NIM). Ficam de fora de
+# proposito pra manter o repo so com o que o bot precisa pra rodar - sem essa
+# linha, um `git add -A` acabaria varrendo eles pra dentro.
+tools/
