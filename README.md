@@ -39,8 +39,12 @@ compartilhada em modulos de nivel superior:
 ## Funcionalidades
 
 ### Chat com IA
-- `/ask <pergunta>` ou mencionar o bot: conversa via modelo `openai/gpt-oss-120b` na API
-  da NVIDIA, com persona propria (ver `SYSTEM_PROMPT` em `cogs/chat.py`) e raciocinio em
+- `/ask <pergunta>` ou mencionar o bot: conversa via modelo `nvidia/nemotron-3-super-120b-a12b`
+  na API da NVIDIA (trocado do `openai/gpt-oss-120b` em jul/2026 — 12B parametros ativos,
+  2.2x a vazao do anterior e superior a ele nos benchmarks da classe; a motivacao foi
+  latencia, ja que cada resposta custa varias chamadas sequenciais). O modelo e so a
+  env `HERMES_MODEL`, entao trocar de novo nao exige mudanca de codigo.
+  Persona propria (ver `SYSTEM_PROMPT` em `cogs/chat.py`) e raciocinio em
   multiplas passadas (rascunho, autocritica/refino e humanizacao) antes de responder.
   Sao `REFINEMENT_ROUNDS + 2` chamadas sequenciais por resposta, todas segurando o lock
   global — por isso o padrao caiu de 3 refinos (5 chamadas) pra 1 (3 chamadas): a fila
@@ -166,7 +170,7 @@ Ver `.env.example`. Copie para `.env` e preencha:
 |---|---|
 | `NVIDIA_API_KEY` | Chave da API NVIDIA NIM (integrate.api.nvidia.com) |
 | `DISCORD_TOKEN` | Token do bot no Discord Developer Portal |
-| `HERMES_MODEL` | Modelo usado no NIM (padrao: `openai/gpt-oss-120b`) |
+| `HERMES_MODEL` | Modelo usado no NIM (padrao: `nvidia/nemotron-3-super-120b-a12b`) |
 | `ALLOWED_GUILD_ID` | ID do unico servidor onde o bot pode ficar |
 | `OWNER_USER_ID` | Seu ID de usuario no Discord (dono, recebe DMs de moderacao/seguranca) |
 | `REFINEMENT_ROUNDS` | Passadas de refino por resposta (padrao `1`, total = valor + 2 chamadas) |
