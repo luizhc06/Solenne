@@ -299,14 +299,30 @@ Noticias:
 # O regex busca o grupo de digitos que aparece IMEDIATAMENTE antes do primeiro "|||"
 # (so espaco em branco entre eles), entao "Line 1: 6 ||| x" ainda extrai "6" em vez
 # de descartar a linha inteira e cair no fallback sem traducao.
-NEWS_LINE_RE = re.compile(r"(\d+)\s*\|\|\|\s*(.+?)\s*\|\|\|\s*(.+)$")
+NEWS_INDEX_RE = re.compile(r"(\d+)\s*\|\|\|\s*(.+)$")
+NEWS_TITLE_SUMMARY_PIPE_RE = re.compile(r"(.+?)\s*\|\|\|\s*(.+)$")
+# Reproduzido em producao (ver PR de correcao): em ~1 a cada 5 respostas o Nemotron
+# troca o SEGUNDO separador por " - " (hifen com espaco dos dois lados) em vez de
+# "|||" - exatamente o separador usado na LISTA DE ENTRADA que o prompt manda pra
+# ele ("{titulo} - {resumo}"), entao nao e acaso: o modelo copia o padrao que acabou
+# de ler em vez do formato de saida pedido. Aceitar esse separador como fallback
+# evita descartar a categoria inteira pro "sem traducao" por causa de uma troca de
+# pontuacao, mantendo a linha completa como segunda tentativa antes de desistir.
+NEWS_TITLE_SUMMARY_DASH_RE = re.compile(r"(.+?)\s+-\s+(.+)$")
 
 
 def parse_news_summary_line(line: str) -> tuple[int, str, str] | None:
-    match = NEWS_LINE_RE.search(line.strip())
-    if not match:
+    index_match = NEWS_INDEX_RE.search(line.strip())
+    if not index_match:
         return None
-    idx_str, titulo_pt, resumo_pt = match.groups()
+    idx_str, rest = index_match.groups()
+    rest = rest.strip()
+
+    split_match = NEWS_TITLE_SUMMARY_PIPE_RE.search(rest) or NEWS_TITLE_SUMMARY_DASH_RE.search(rest)
+    if not split_match:
+        return None
+
+    titulo_pt, resumo_pt = split_match.groups()
     return int(idx_str), titulo_pt.strip(), resumo_pt.strip()
 
 
