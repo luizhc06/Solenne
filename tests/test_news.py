@@ -73,6 +73,31 @@ def test_parse_news_summary_line_rejects_lines_without_delimiter():
     assert parse_news_summary_line("") is None
 
 
+def test_parse_news_summary_line_accepts_dash_fallback_separator():
+    """Reproduzido ao vivo contra o Nemotron em producao: em ~1 a cada 5 respostas o
+    modelo troca o SEGUNDO "|||" por " - " (o mesmo separador usado na lista de
+    entrada do prompt), derrubando a categoria inteira pro fallback sem traducao
+    antes desta correcao. Linha real capturada do bug."""
+    idx, titulo, resumo = parse_news_summary_line(
+        "0 ||| Dois tripulantes mortos apos colisao de helicopteros de combate a incendios na Grecia, "
+        "piloto britanico sobrevive - Um dinamarques e um grego morreram no incidente, enquanto um "
+        "piloto britanico e outro tripulante grego sobreviveram.  "
+    )
+    assert idx == 0
+    assert titulo == "Dois tripulantes mortos apos colisao de helicopteros de combate a incendios na Grecia, piloto britanico sobrevive"
+    assert resumo.startswith("Um dinamarques e um grego morreram")
+
+
+def test_parse_news_summary_line_prefers_double_pipe_over_dash():
+    """Se o titulo em si contiver um hifen normal, o separador "|||" correto ainda
+    deve ganhar - o fallback de hifen so entra quando NAO ha segundo "|||"."""
+    idx, titulo, resumo = parse_news_summary_line(
+        "1 ||| Empresa Zen-6 anuncia resultados ||| Resumo qualquer com texto suficiente aqui."
+    )
+    assert titulo == "Empresa Zen-6 anuncia resultados"
+    assert resumo == "Resumo qualquer com texto suficiente aqui."
+
+
 def test_parse_news_summary_line_strips_whitespace():
     idx, titulo, resumo = parse_news_summary_line("  3   |||   Titulo   |||   Resumo aqui com bastante texto.  ")
     assert idx == 3
