@@ -92,6 +92,16 @@ async def _complete(messages: list[dict], temperature: float, max_tokens: int = 
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                # nvidia/nemotron-3-super-120b-a12b e um modelo de raciocinio: por padrao
+                # ele despeja uma cadeia de pensamento inteira (em ingles) antes da
+                # resposta final, e sob max_tokens apertado (800 no chat, por exemplo)
+                # isso estoura o orcamento e corta a resposta no meio do raciocinio -
+                # foi a causa real de noticias saindo cruas/em ingles apos a troca de
+                # modelo (o parser de "INDICE ||| titulo ||| resumo" nunca chegava a
+                # ver a linha formatada). enable_thinking=False e a chave documentada
+                # da NVIDIA pra esse modelo especifico; parametro extra e ignorado sem
+                # erro por outros modelos que nao usam essa chave de chat template.
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             # A API as vezes retorna content=None (sem levantar erro) em vez de string vazia.
             return completion.choices[0].message.content or ""

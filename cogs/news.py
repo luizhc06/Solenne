@@ -292,6 +292,24 @@ Noticias:
 {items_text}"""
 
 
+# Extrai (INDICE, titulo_pt, resumo_pt) de uma linha da resposta da IA. O parser
+# original exigia a linha inteira no formato exato "N ||| titulo ||| resumo" - um
+# modelo de raciocinio (como o Nemotron, mesmo com enable_thinking=False de vez em
+# quando) pode prefixar a linha com algo tipo "Line 1: 6 ||| ..." antes do numero.
+# O regex busca o grupo de digitos que aparece IMEDIATAMENTE antes do primeiro "|||"
+# (so espaco em branco entre eles), entao "Line 1: 6 ||| x" ainda extrai "6" em vez
+# de descartar a linha inteira e cair no fallback sem traducao.
+NEWS_LINE_RE = re.compile(r"(\d+)\s*\|\|\|\s*(.+?)\s*\|\|\|\s*(.+)$")
+
+
+def parse_news_summary_line(line: str) -> tuple[int, str, str] | None:
+    match = NEWS_LINE_RE.search(line.strip())
+    if not match:
+        return None
+    idx_str, titulo_pt, resumo_pt = match.groups()
+    return int(idx_str), titulo_pt.strip(), resumo_pt.strip()
+
+
 async def _summarize_category(items: list[dict], interest_hint: str = "") -> list[dict]:
     if not items:
         return []
@@ -313,18 +331,14 @@ async def _summarize_category(items: list[dict], interest_hint: str = "") -> lis
         raw = await _complete([{"role": "user", "content": prompt}], temperature=0.4, max_tokens=1800)
         picked = []
         for line in raw.strip().splitlines():
-            line = line.strip()
-            parts = line.split("|||")
-            if len(parts) != 3:
+            parsed = parse_news_summary_line(line)
+            if parsed is None:
                 continue
-            idx_str, titulo_pt, resumo_pt = (p.strip() for p in parts)
-            if not idx_str.isdigit():
-                continue
+            idx, titulo_pt, resumo_pt = parsed
             # Resumo suspeito demais curto costuma ser resposta cortada no meio -
             # melhor descartar esse item do que mostrar algo quebrado tipo "O".
             if len(resumo_pt) < 15:
                 continue
-            idx = int(idx_str)
             if 0 <= idx < len(items):
                 item = dict(items[idx])
                 item["title_pt"] = titulo_pt or item["title"]
