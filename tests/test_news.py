@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from cogs.news import _summarize_anilist_entries, interleave_by_source
+from cogs.news import _summarize_anilist_entries, interleave_by_source, parse_news_summary_line
 
 
 def _item(source, link, hours_ago=None):
@@ -45,6 +45,39 @@ def test_interleave_keeps_items_without_date_last():
     feed = [_item("A", "sem-data"), _item("A", "recente", hours_ago=1)]
     merged = interleave_by_source([feed])
     assert [it["link"] for it in merged] == ["recente", "sem-data"]
+
+
+def test_parse_news_summary_line_clean_format():
+    idx, titulo, resumo = parse_news_summary_line(
+        "6 ||| Titulo traduzido ||| Resumo curto em portugues com mais de vinte caracteres."
+    )
+    assert idx == 6
+    assert titulo == "Titulo traduzido"
+    assert resumo == "Resumo curto em portugues com mais de vinte caracteres."
+
+
+def test_parse_news_summary_line_tolerates_reasoning_model_prefix():
+    """Nemotron (e outros modelos de raciocinio) as vezes prefixam a linha com algo
+    tipo "Line 1: " antes do indice, mesmo com enable_thinking=False - o parser
+    original exigia a linha inteira no formato exato e descartava isso tudo, o que
+    derrubava a categoria inteira pro fallback sem traducao (o bug relatado)."""
+    idx, titulo, resumo = parse_news_summary_line(
+        "Line 1: 6 ||| Irã suspeito de ataques ciberneticos ||| Varias cidades dos EUA relataram ataques."
+    )
+    assert idx == 6
+    assert titulo == "Irã suspeito de ataques ciberneticos"
+
+
+def test_parse_news_summary_line_rejects_lines_without_delimiter():
+    assert parse_news_summary_line("So um comentario qualquer do modelo, sem formato.") is None
+    assert parse_news_summary_line("") is None
+
+
+def test_parse_news_summary_line_strips_whitespace():
+    idx, titulo, resumo = parse_news_summary_line("  3   |||   Titulo   |||   Resumo aqui com bastante texto.  ")
+    assert idx == 3
+    assert titulo == "Titulo"
+    assert resumo == "Resumo aqui com bastante texto."
 
 
 def test_summarize_anilist_entries_empty():
