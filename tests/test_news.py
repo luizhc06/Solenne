@@ -1,6 +1,13 @@
 from datetime import datetime, timezone
 
-from cogs.news import _summarize_anilist_entries, interleave_by_source, parse_news_summary_line
+from cogs.news import (
+    _summarize_anilist_entries,
+    build_curated_items,
+    dedup_same_story,
+    interleave_by_source,
+    resolve_picked_item,
+    same_story,
+)
 
 
 def _item(source, link, hours_ago=None):
@@ -47,62 +54,115 @@ def test_interleave_keeps_items_without_date_last():
     assert [it["link"] for it in merged] == ["recente", "sem-data"]
 
 
-def test_parse_news_summary_line_clean_format():
-    idx, titulo, resumo = parse_news_summary_line(
-        "6 ||| Titulo traduzido ||| Resumo curto em portugues com mais de vinte caracteres."
-    )
-    assert idx == 6
-    assert titulo == "Titulo traduzido"
-    assert resumo == "Resumo curto em portugues com mais de vinte caracteres."
+def _news(titulo, link=None, source="BBC"):
+    return {"title": titulo, "link": link or titulo.lower().replace(" ", "-"),
+            "summary": "resumo original", "source": source, "image": None, "published": None}
 
 
-def test_parse_news_summary_line_tolerates_reasoning_model_prefix():
-    """Nemotron (e outros modelos de raciocinio) as vezes prefixam a linha com algo
-    tipo "Line 1: " antes do indice, mesmo com enable_thinking=False - o parser
-    original exigia a linha inteira no formato exato e descartava isso tudo, o que
-    derrubava a categoria inteira pro fallback sem traducao (o bug relatado)."""
-    idx, titulo, resumo = parse_news_summary_line(
-        "Line 1: 6 ||| Irã suspeito de ataques ciberneticos ||| Varias cidades dos EUA relataram ataques."
-    )
-    assert idx == 6
-    assert titulo == "Irã suspeito de ataques ciberneticos"
+HELICOPTERO_A = "Two crew members killed after firefighting helicopters collide in Greece"
+HELICOPTERO_B = "Two crew die in Greek firefighting helicopter crash"
 
 
-def test_parse_news_summary_line_rejects_lines_without_delimiter():
-    assert parse_news_summary_line("So um comentario qualquer do modelo, sem formato.") is None
-    assert parse_news_summary_line("") is None
+def test_same_story_reconhece_a_mesma_materia_em_fontes_diferentes():
+    """Caso real capturado da sonda: BBC e Al Jazeera publicando o mesmo acidente com
+    manchetes diferentes. Antes as duas entravam no digest como noticias distintas."""
+    assert same_story(HELICOPTERO_A, HELICOPTERO_B) is True
 
 
-def test_parse_news_summary_line_accepts_dash_fallback_separator():
-    """Reproduzido ao vivo contra o Nemotron em producao: em ~1 a cada 5 respostas o
-    modelo troca o SEGUNDO "|||" por " - " (o mesmo separador usado na lista de
-    entrada do prompt), derrubando a categoria inteira pro fallback sem traducao
-    antes desta correcao. Linha real capturada do bug."""
-    idx, titulo, resumo = parse_news_summary_line(
-        "0 ||| Dois tripulantes mortos apos colisao de helicopteros de combate a incendios na Grecia, "
-        "piloto britanico sobrevive - Um dinamarques e um grego morreram no incidente, enquanto um "
-        "piloto britanico e outro tripulante grego sobreviveram.  "
-    )
-    assert idx == 0
-    assert titulo == "Dois tripulantes mortos apos colisao de helicopteros de combate a incendios na Grecia, piloto britanico sobrevive"
-    assert resumo.startswith("Um dinamarques e um grego morreram")
+def test_same_story_nao_junta_materias_so_parecidas():
+    """Assunto proximo nao e o mesmo fato - juntar aqui seria pior que repetir."""
+    assert same_story(
+        "UE aprova novo pacote de sancoes contra a Russia",
+        "EUA impoem novas sancoes contra a Russia",
+    ) is False
 
 
-def test_parse_news_summary_line_prefers_double_pipe_over_dash():
-    """Se o titulo em si contiver um hifen normal, o separador "|||" correto ainda
-    deve ganhar - o fallback de hifen so entra quando NAO ha segundo "|||"."""
-    idx, titulo, resumo = parse_news_summary_line(
-        "1 ||| Empresa Zen-6 anuncia resultados ||| Resumo qualquer com texto suficiente aqui."
-    )
-    assert titulo == "Empresa Zen-6 anuncia resultados"
-    assert resumo == "Resumo qualquer com texto suficiente aqui."
+def test_same_story_ignora_acento_e_caixa():
+    assert same_story("Inundacoes deslocam 200 mil no Paquistao",
+                      "INUNDAÇÕES DESLOCAM 200 MIL NO PAQUISTÃO") is True
 
 
-def test_parse_news_summary_line_strips_whitespace():
-    idx, titulo, resumo = parse_news_summary_line("  3   |||   Titulo   |||   Resumo aqui com bastante texto.  ")
-    assert idx == 3
-    assert titulo == "Titulo"
-    assert resumo == "Resumo aqui com bastante texto."
+def test_dedup_same_story_mantem_a_primeira_ocorrencia():
+    items = [_news(HELICOPTERO_A, "a"), _news(HELICOPTERO_B, "b"), _news("EU agrees new sanctions package on Russia", "c")]
+    restantes = dedup_same_story(items)
+    assert [it["link"] for it in restantes] == ["a", "c"]
+
+
+def test_resolve_picked_item_usa_o_indice_quando_o_eco_confirma():
+    items = [_news("Israel and Hamas agree to extend ceasefire"), _news(HELICOPTERO_A)]
+    escolha = {"i": 1, "eco": "Two crew members killed after"}
+    assert resolve_picked_item(escolha, items)["title"] == HELICOPTERO_A
+
+
+def test_resolve_picked_item_corrige_indice_trocado_pelo_eco():
+    """O bug mais grave possivel aqui: a IA devolve o texto de uma noticia com o indice
+    de outra, e o card sai com titulo certo, link e imagem errados - parecendo correto.
+    Reproduzido contra a API real antes do campo "eco" existir."""
+    items = [_news(HELICOPTERO_A), _news("Israel and Hamas agree to extend ceasefire")]
+    escolha = {"i": 0, "eco": "Israel and Hamas agree to"}
+    assert resolve_picked_item(escolha, items)["title"] == "Israel and Hamas agree to extend ceasefire"
+
+
+def test_resolve_picked_item_descarta_quando_nada_casa():
+    items = [_news(HELICOPTERO_A)]
+    assert resolve_picked_item({"i": 9, "eco": "Completely unrelated headline here"}, items) is None
+
+
+def test_resolve_picked_item_aceita_indice_como_string():
+    """Mesmo com response_format, o modelo as vezes devolve "i": "2" em vez de 2."""
+    items = [_news("a"), _news("b"), _news(HELICOPTERO_A)]
+    assert resolve_picked_item({"i": "2", "eco": "Two crew members killed after"}, items)["title"] == HELICOPTERO_A
+
+
+def test_build_curated_items_monta_os_campos_traduzidos():
+    items = [_news(HELICOPTERO_A, "link-a")]
+    payload = {"noticias": [{
+        "i": 0, "eco": "Two crew members killed after",
+        "titulo": "Dois tripulantes morrem em colisao de helicopteros na Grecia",
+        "resumo": "Um dinamarques e um grego morreram na colisao perto de Atenas.",
+    }]}
+    curados = build_curated_items(payload, items)
+    assert len(curados) == 1
+    assert curados[0]["link"] == "link-a"
+    assert curados[0]["title_pt"].startswith("Dois tripulantes")
+
+
+def test_build_curated_items_corta_titulo_longo_na_palavra():
+    items = [_news(HELICOPTERO_A, "link-a")]
+    payload = {"noticias": [{
+        "i": 0, "eco": "Two crew members killed after",
+        "titulo": "Dois tripulantes morrem apos colisao de helicopteros de combate a incendios "
+                  "na Grecia enquanto piloto britanico sobrevive ao acidente perto de Atenas",
+        "resumo": "Um dinamarques e um grego morreram na colisao perto de Atenas.",
+    }]}
+    titulo = build_curated_items(payload, items)[0]["title_pt"]
+    assert len(titulo) <= 90
+    assert titulo.endswith("…")
+    assert not titulo[:-1].endswith(" ")
+
+
+def test_build_curated_items_descarta_resumo_cortado_no_meio():
+    """Resumo minusculo e sinal de resposta truncada - melhor pular o item do que
+    mostrar um card com a descricao "O"."""
+    items = [_news(HELICOPTERO_A, "link-a")]
+    payload = {"noticias": [{"i": 0, "eco": "Two crew members killed after", "titulo": "Titulo ok", "resumo": "O"}]}
+    assert build_curated_items(payload, items) == []
+
+
+def test_build_curated_items_nao_repete_o_mesmo_link():
+    items = [_news(HELICOPTERO_A, "link-a")]
+    escolha = {"i": 0, "eco": "Two crew members killed after", "titulo": "Titulo ok",
+               "resumo": "Resumo com tamanho suficiente pra passar."}
+    assert len(build_curated_items({"noticias": [escolha, dict(escolha)]}, items)) == 1
+
+
+def test_build_curated_items_rejeita_payload_sem_lista():
+    items = [_news(HELICOPTERO_A)]
+    try:
+        build_curated_items({"resultado": "nada"}, items)
+    except ValueError:
+        return
+    raise AssertionError("payload sem 'noticias' deveria levantar ValueError")
 
 
 def test_summarize_anilist_entries_empty():

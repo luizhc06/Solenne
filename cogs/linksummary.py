@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ai_client import ai_lock, _complete
+from ai_client import ai_gate, _complete, THINK_LOW
 from utils import thinking_embed
 from views import FeedbackView
 
@@ -117,8 +117,10 @@ async def summarize_url(url: str) -> tuple[str, str]:
         raise UnsafeURLError("Essa pagina nao tem texto suficiente pra resumir (talvez carregue por JavaScript).")
 
     prompt = LINK_SUMMARY_PROMPT.format(title=title or "(sem titulo)", url=url, text=text[:MAX_TEXT_CHARS])
-    async with ai_lock:
-        summary = await _complete([{"role": "user", "content": prompt}], temperature=0.4, max_tokens=900)
+    async with ai_gate.interactive():
+        summary = await _complete(
+            [{"role": "user", "content": prompt}], max_tokens=900, thinking=THINK_LOW
+        )
     return title, summary
 
 

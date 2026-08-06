@@ -9,10 +9,17 @@ from discord.ext import commands
 
 from config import OWNER_USER_ID, NEWS_TIMEZONE, DIAS_SEMANA
 from db import load_recent_history, save_message, get_user_summary, load_user_messages
-from ai_client import ai_lock, _think_and_answer, _complete, friendly_ai_error
+from ai_client import ai_gate, _think_and_answer, _complete, friendly_ai_error, THINK_LOW
 from user_profile import update_profile
 from notify import notify_owner_text
-from utils import thinking_embed, is_ambient_channel, looks_like_question, AMBIENT_COOLDOWN_SECONDS
+from utils import (
+    thinking_embed,
+    is_ambient_channel,
+    looks_like_question,
+    mentions_solenne,
+    split_discord_message,
+    AMBIENT_COOLDOWN_SECONDS,
+)
 from views import FeedbackView
 from cogs.search import wants_web_search, auto_search_reply
 
@@ -34,7 +41,7 @@ Principios:
 - Priorize clareza sobre floreio: frases curtas, sem enrolacao, sem elogios vazios tipo "otima pergunta!!!".
 - Pense em consequencias praticas, nao so teoria bonita.
 
-Como pensar (pipeline mental antes de responder):
+Como pensar (no seu raciocinio, antes de responder):
 1. Identifique o problema central da pergunta.
 2. Separe fatos de opiniao.
 3. Analise pros e contras de cada caminho.
@@ -46,11 +53,15 @@ Quando usar referencias, prefira UMA lente clara ligada ao problema:
 - Vida/trabalho -> estoicismo (foque no que voce controla).
 - Liberdade/autonomia -> existencialismo (voce escolhe o sentido, nao recebe pronto).
 
-Tom e formato:
+Tom e formato (regras duras):
+- Escreva a resposta FINAL direto, como quem manda mensagem no Discord. Nunca mostre seu raciocinio,
+  nunca escreva "Solenne:" nem qualquer prefixo com o seu nome, nunca anuncie o que vai fazer antes de fazer.
+- Ajuste o tamanho a pergunta: pergunta factual ou de bate-papo se responde em 1 a 3 frases. So passe
+  de ~1200 caracteres se o assunto for tecnico e realmente exigir. Ninguem pediu redacao.
 - Direta, amigavel, zero bajulacao. Nunca seca ou fria.
+- Nada de titulo/cabecalho em markdown. No maximo uma lista curta de 2 a 4 itens, quando ajudar de verdade.
 - Emojis: no maximo 1 ou 2 por resposta, e so quando realmente fizer sentido. Nunca liste varios emojis seguidos nem use emoji como resposta em si.
 - Evite CAPS LOCK exagerado; use enfase pontual quando algo for MUITO importante.
-- Priorize listas curtas e resumos executivos, evite parede de texto.
 - Nunca invente fatos com confianca quando tiver duvida.
 - Nunca responda so com "depende, cada um e unico" - quando apropriado, escolha um lado e explique por que.
 - Se alguem ficar bravo, grosso ou impaciente com voce (ex: reclamando por nao ser
@@ -86,7 +97,7 @@ IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
 
 
 async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id: int) -> str:
-    async with ai_lock:
+    async with ai_gate.interactive():
         loop = asyncio.get_event_loop()
 
         history = await loop.run_in_executor(None, load_recent_history, channel_id)
@@ -103,7 +114,10 @@ async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id
             SYSTEM_PROMPT
             + f"\n\nData e hora atual: {dia_semana_pt}, {agora.strftime('%d/%m/%Y %H:%M')} "
             f"(horario de Brasilia). Use isso se precisar saber que dia/hora e agora, "
-            f"nunca invente ou chute uma data."
+            f"nunca invente ou chute uma data. Seu conhecimento de treino e mais antigo que "
+            f"essa data, entao NUNCA diga que um produto, evento ou lancamento 'nao existe' "
+            f"so porque voce nao conhece - diga que nao tem informacao sobre ele e, se for o "
+            f"caso, sugira /pesquisa."
             + f"\n\nO ID Discord do seu dono/criador (Rizu) e {OWNER_USER_ID}. A mensagem atual "
             + ("VEIO do dono de verdade (o ID bate)." if eh_dono else "NAO veio do dono (o ID nao bate com o do dono).")
             + " Use isso pra responder com certeza sobre quem e o dono, em vez de dizer que "
@@ -141,14 +155,28 @@ Historico de mensagens:
 
 
 async def summarize_channel(channel_id: int, limit: int) -> str:
-    async with ai_lock:
+    async with ai_gate.interactive():
         loop = asyncio.get_event_loop()
         raw_history = await loop.run_in_executor(None, load_user_messages, channel_id, limit)
         if not raw_history:
             return ""
         history_text = "\n".join(f"{msg['author']}: {msg['content']}" for msg in raw_history)
         prompt = SUMMARY_PROMPT.format(chat_history_text=history_text)
-        return await _complete([{"role": "user", "content": prompt}], temperature=0.8, max_tokens=800)
+        return await _complete(
+            [{"role": "user", "content": prompt}], max_tokens=900, thinking=THINK_LOW
+        )
+
+
+async def _send_placeholder(message: discord.Message, embed: discord.Embed) -> discord.Message:
+    """Manda o "Pensando..." como resposta a mensagem, caindo pro canal se nao der.
+
+    mention_author=False pra nao pingar quem perguntou: a thread ja aponta pra mensagem.
+    """
+    try:
+        return await message.reply(embed=embed, mention_author=False)
+    except discord.HTTPException:
+        # Mensagem original apagada entre a pergunta e a resposta, por exemplo.
+        return await message.channel.send(embed=embed)
 
 
 class ChatCog(commands.Cog):
@@ -165,26 +193,41 @@ class ChatCog(commands.Cog):
             # moderacao), e ela nunca deve responder mensagens recebidas em DM de ninguem.
             return
 
+        # Tres jeitos de falar com ela DE PROPOSITO, todos com prioridade sobre o
+        # modo ambiente (sem cooldown, funcionam em qualquer canal):
+        #  1. @Solenne - o unico que existia antes.
+        #  2. Responder (reply) uma mensagem dela. Quem responde com o ping desligado
+        #     nao entra em message.mentions, entao a Solenne ignorava a propria conversa -
+        #     causa provavel do "as vezes ela nao responde".
+        #  3. Chamar pelo nome ("solenne, o que voce acha disso?"), que era exatamente
+        #     o gesto mais natural e o unico que nao funcionava.
         mentioned = self.bot.user in message.mentions
-        ambient_trigger = False
+        replied_to_her = (
+            message.reference is not None
+            and isinstance(message.reference.resolved, discord.Message)
+            and message.reference.resolved.author.id == self.bot.user.id
+        )
+        called_by_name = mentions_solenne(message.content)
+        direct = mentioned or replied_to_her or called_by_name
 
-        if not mentioned and is_ambient_channel(message.channel) and looks_like_question(message.content):
+        ambient_trigger = False
+        if not direct and is_ambient_channel(message.channel) and looks_like_question(message.content):
             last = self.ambient_last_reply.get(message.channel.id, 0.0)
             if time.monotonic() - last >= AMBIENT_COOLDOWN_SECONDS:
                 ambient_trigger = True
 
-        if not mentioned and not ambient_trigger:
+        if not direct and not ambient_trigger:
             return
 
-        if mentioned:
-            content = message.content.replace(f"<@{self.bot.user.id}>", "").strip() or "Oi!"
-        else:
-            content = message.content
+        content = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+        if direct and not content:
+            content = "Oi!"
+        if not direct:
             self.ambient_last_reply[message.channel.id] = time.monotonic()
 
         if wants_web_search(content):
-            placeholder = await message.channel.send(
-                embed=thinking_embed(f'🔎 Pesquisando sobre "{content[:100]}"...', eta_seconds=20)
+            placeholder = await _send_placeholder(
+                message, thinking_embed(f'🔎 Pesquisando sobre "{content[:100]}"...', eta_seconds=20)
             )
             try:
                 text, embed = await auto_search_reply(
@@ -196,7 +239,9 @@ class ChatCog(commands.Cog):
             await placeholder.edit(content=text, embed=embed, view=FeedbackView(content[:200]))
             return
 
-        placeholder = await message.channel.send(embed=thinking_embed())
+        # Responde em thread na mensagem original: num canal movimentado a resposta
+        # solta se perde no meio da conversa e da a impressao de que ela nao respondeu.
+        placeholder = await _send_placeholder(message, thinking_embed())
         try:
             reply = await ask_hermes(
                 message.channel.id, content, message.author.display_name, message.author.id
@@ -210,9 +255,12 @@ class ChatCog(commands.Cog):
                 f"`{type(exc).__name__}: {str(exc)[:300]}`",
             )
 
-        await placeholder.edit(content=reply[:1900], embed=None, view=FeedbackView(content[:200]))
-        for chunk_start in range(1900, len(reply), 1900):
-            await message.channel.send(reply[chunk_start:chunk_start + 1900])
+        partes = split_discord_message(reply) or [
+            "Fiquei sem palavras aqui (resposta veio vazia). Pergunta de novo?"
+        ]
+        await placeholder.edit(content=partes[0], embed=None, view=FeedbackView(content[:200]))
+        for parte in partes[1:]:
+            await message.channel.send(parte)
 
     @app_commands.command(name="ask", description="Pergunte algo a Solenne")
     @app_commands.describe(pergunta="O que voce quer perguntar")
@@ -225,11 +273,14 @@ class ChatCog(commands.Cog):
         except Exception as exc:
             log.exception("Erro ao consultar Solenne")
             reply = friendly_ai_error(exc)
+        partes = split_discord_message(reply) or [
+            "Fiquei sem palavras aqui (resposta veio vazia). Pergunta de novo?"
+        ]
         await interaction.edit_original_response(
-            content=reply[:1900], embed=None, view=FeedbackView(pergunta[:200])
+            content=partes[0], embed=None, view=FeedbackView(pergunta[:200])
         )
-        for chunk_start in range(1900, len(reply), 1900):
-            await interaction.followup.send(reply[chunk_start:chunk_start + 1900])
+        for parte in partes[1:]:
+            await interaction.followup.send(parte)
 
     @app_commands.command(name="resumo", description="Resume o que rolou de conversa recente no canal")
     @app_commands.describe(mensagens="Quantas mensagens analisar (10-100, padrao 50)")

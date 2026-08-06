@@ -2,6 +2,7 @@ import re
 import asyncio
 import random
 import logging
+import unicodedata
 from datetime import datetime, timedelta, timezone, time as dtime
 
 import httpx
@@ -12,8 +13,8 @@ from discord.ext import commands, tasks
 
 from config import ALLOWED_GUILD_ID, NEWS_TIMEZONE, ANILIST_USERNAME
 from db import filter_unposted_links, mark_news_posted
-from ai_client import ai_lock, _complete
-from utils import thinking_embed, NEWS_THINKING_ETA_SECONDS, TTLCache
+from ai_client import ai_gate, _complete, complete_json, THINK_OFF
+from utils import thinking_embed, NEWS_THINKING_ETA_SECONDS, TTLCache, truncate_words
 from views import FeedbackView
 from notify import notify_owner_text
 
@@ -22,11 +23,19 @@ log = logging.getLogger("hermes-bot")
 NEWS_CHANNEL_NAME = "noticias"
 NEWS_POST_TIME = dtime(hour=12, minute=0, tzinfo=NEWS_TIMEZONE)
 NEWS_LOOKBACK_HOURS = 30
-NEWS_ITEMS_PER_CATEGORY = 4
+# 3 por categoria x 6 categorias = 18 cards. Era 4 (24 cards): o digest virava uma
+# parede de rolagem e as manchetes menos relevantes diluiam as que importavam.
+NEWS_ITEMS_PER_CATEGORY = 3
 # Quantos candidatos a IA recebe pra escolher. Precisa ser bem maior que
 # NEWS_ITEMS_PER_CATEGORY, senao ela nao tem de onde escolher e o "mais relevante"
 # vira so "os primeiros do feed".
-NEWS_CANDIDATES_PER_CATEGORY = NEWS_ITEMS_PER_CATEGORY * 3
+NEWS_CANDIDATES_PER_CATEGORY = NEWS_ITEMS_PER_CATEGORY * 4
+
+# Limites do que sai no card. Titulo curto e o pedido central: o modelo tende a
+# traduzir a manchete inteira, com subtitulo e aposto, e o embed virava um paragrafo
+# em negrito. O prompt pede o corte e isso aqui garante.
+NEWS_TITLE_MAX_CHARS = 90
+NEWS_SUMMARY_MAX_CHARS = 300
 
 # feedparser.parse(url) baixa por conta propria, com socket sem timeout - um feed
 # lento pendura a thread do executor e trava o digest inteiro. Baixamos com httpx
@@ -157,9 +166,14 @@ NEWS_CATEGORIES = {
         # congelado desde maio/2023 - todo item caia fora do cutoff e a categoria
         # Brasil virava 100% politica. Se o Brasil sumir de novo, checar a data do
         # item mais recente do feed antes de suspeitar do resto do pipeline.
+        #
+        # G1 Politica saiu (ago/2026) pelo mesmo motivo pelo qual o feed congelado
+        # incomodava: com o G1 geral ja cheio de politica, a segunda fonte dobrava a
+        # aposta e o "Brasil" do dia virava so Brasilia. G1 Economia foi conferido
+        # com o mesmo volume e frescor (10 itens nas ultimas 30h).
         "feeds": [
             ("G1", "https://g1.globo.com/rss/g1/"),
-            ("G1 Politica", "https://g1.globo.com/rss/g1/politica/"),
+            ("G1 Economia", "https://g1.globo.com/rss/g1/economia/"),
         ],
     },
     "mundo": {
@@ -272,58 +286,157 @@ def _collect_category_items(category: dict) -> list[dict]:
             seen.add(it["link"])
             deduped.append(it)
 
-    return deduped[:NEWS_CANDIDATES_PER_CATEGORY]
+    # Depois do filtro por link, tira tambem a mesma materia publicada por fontes
+    # diferentes (links diferentes, fato identico) - antes as duas iam pro digest.
+    return dedup_same_story(deduped)[:NEWS_CANDIDATES_PER_CATEGORY]
 
 
-NEWS_SUMMARY_PROMPT = """Voce recebeu uma lista de noticias reais (titulo + resumo original, podem estar
-em ingles) de uma categoria. Escolha as {n} mais relevantes e importantes. Para cada uma, traduza o
-titulo para portugues (mantendo o sentido, sem inventar) e escreva um resumo curto em portugues (1-2
-frases, direto, sem floreio, sem opiniao). Nao invente nada que nao esteja no texto original - se um
-resumo original for vago, mantenha vago. Se o titulo/resumo original ja estiver em portugues, so
-mantenha ou ajuste levemente. Responda EXATAMENTE nesse formato, uma linha por noticia escolhida, na
-ordem de importancia, usando " ||| " como separador:
+NEWS_SUMMARY_PROMPT = """Voce e a curadoria de noticias da Solenne. Abaixo esta uma lista numerada de
+noticias reais de uma categoria (titulo + resumo original, podem estar em ingles).
 
-INDICE ||| titulo traduzido para portugues ||| resumo em portugues
+Escolha as {n} MAIS relevantes e importantes, em ordem de importancia. Regras:
+- Se duas entradas forem sobre o MESMO fato, use so uma delas (a de melhor resumo) e descarte a outra.
+- Descarte o que nao for noticia de verdade (publicidade, "melhores ofertas", lista de cupom, promocao).
+- "i": o numero EXATO do item na lista abaixo (comecando em 0).
+- "eco": copie as 5 PRIMEIRAS palavras do titulo original desse item, sem traduzir e sem mudar nada.
+- "titulo": o fato principal em portugues do Brasil, no MAXIMO {titulo_max} caracteres. Corte subtitulo,
+  aposto, nome de fonte e explicacao - isso vai no resumo, nao no titulo.
+- "resumo": 1 frase em portugues do Brasil, no MAXIMO {resumo_max} caracteres, so com o que esta no
+  texto original. Se o resumo original for vago, mantenha vago - nunca complete com conhecimento proprio.
+- Sem opiniao, sem floreio, sem emoji. Tudo em portugues do Brasil, menos o campo "eco".
 
-Onde INDICE e o numero do item na lista abaixo (comecando em 0). Nao inclua mais nada alem dessas linhas,
-sem numeracao extra, sem comentarios.
+Responda SOMENTE com um objeto JSON valido, sem cerca de codigo e sem nenhum texto em volta:
+{{"noticias": [{{"i": 0, "eco": "...", "titulo": "...", "resumo": "..."}}]}}
 
 Noticias:
 {items_text}"""
 
+# Palavras curtas demais pra distinguir uma materia de outra - so poluem a comparacao.
+_DEDUP_MIN_WORD_LEN = 4
+# Prefixo usado no lugar da palavra inteira pra "helicopters" casar com "helicopter"
+# e "sancoes" com "sancao", sem precisar de stemmer de verdade.
+_DEDUP_STEM_LEN = 6
+# Ligacao e conectivo que aparecem em qualquer manchete: sao longos o bastante pra
+# passar do filtro de tamanho, mas nao dizem nada sobre QUAL e o assunto.
+_DEDUP_STOPWORDS = {
+    "contra", "sobre", "entre", "apos", "para", "pelos", "pelas", "novo", "nova",
+    "novos", "novas", "diz", "dizem", "afirm", "segund", "durant", "ainda", "mais",
+    "after", "with", "from", "over", "into", "amid", "says", "said", "than", "that",
+    "this", "their", "have", "will", "amid", "under", "about",
+}
+# Fracao das palavras significativas da manchete MENOR que precisa aparecer na outra.
+_DEDUP_OVERLAP_THRESHOLD = 0.6
+# ...E quantas palavras distintivas precisam coincidir em numero absoluto. So a fracao
+# nao basta: "UE aprova sancoes contra a Russia" e "EUA impoem sancoes contra a Russia"
+# batem 2 de 3 (0.67, ACIMA do limiar) sendo materias diferentes, enquanto a mesma
+# materia de helicoptero contada por duas fontes bate 3 de 5 (0.6). O que separa os dois
+# casos nao e a proporcao, e a quantidade de detalhe concreto em comum: duas versoes do
+# mesmo fato compartilham varios substantivos especificos, nao so tema + pais.
+_DEDUP_MIN_SHARED_WORDS = 3
 
-# Extrai (INDICE, titulo_pt, resumo_pt) de uma linha da resposta da IA. O parser
-# original exigia a linha inteira no formato exato "N ||| titulo ||| resumo" - um
-# modelo de raciocinio (como o Nemotron, mesmo com enable_thinking=False de vez em
-# quando) pode prefixar a linha com algo tipo "Line 1: 6 ||| ..." antes do numero.
-# O regex busca o grupo de digitos que aparece IMEDIATAMENTE antes do primeiro "|||"
-# (so espaco em branco entre eles), entao "Line 1: 6 ||| x" ainda extrai "6" em vez
-# de descartar a linha inteira e cair no fallback sem traducao.
-NEWS_INDEX_RE = re.compile(r"(\d+)\s*\|\|\|\s*(.+)$")
-NEWS_TITLE_SUMMARY_PIPE_RE = re.compile(r"(.+?)\s*\|\|\|\s*(.+)$")
-# Reproduzido em producao (ver PR de correcao): em ~1 a cada 5 respostas o Nemotron
-# troca o SEGUNDO separador por " - " (hifen com espaco dos dois lados) em vez de
-# "|||" - exatamente o separador usado na LISTA DE ENTRADA que o prompt manda pra
-# ele ("{titulo} - {resumo}"), entao nao e acaso: o modelo copia o padrao que acabou
-# de ler em vez do formato de saida pedido. Aceitar esse separador como fallback
-# evita descartar a categoria inteira pro "sem traducao" por causa de uma troca de
-# pontuacao, mantendo a linha completa como segunda tentativa antes de desistir.
-NEWS_TITLE_SUMMARY_DASH_RE = re.compile(r"(.+?)\s+-\s+(.+)$")
+
+def _significant_words(title: str) -> set[str]:
+    sem_acento = unicodedata.normalize("NFKD", title.lower())
+    sem_acento = "".join(c for c in sem_acento if not unicodedata.combining(c))
+    palavras = re.findall(r"[a-z0-9]+", sem_acento)
+    stems = {p[:_DEDUP_STEM_LEN] for p in palavras if len(p) >= _DEDUP_MIN_WORD_LEN}
+    return stems - _DEDUP_STOPWORDS
 
 
-def parse_news_summary_line(line: str) -> tuple[int, str, str] | None:
-    index_match = NEWS_INDEX_RE.search(line.strip())
-    if not index_match:
-        return None
-    idx_str, rest = index_match.groups()
-    rest = rest.strip()
+def same_story(title_a: str, title_b: str) -> bool:
+    """Se duas manchetes cobrem o mesmo fato, mesmo escritas por veiculos diferentes."""
+    a, b = _significant_words(title_a), _significant_words(title_b)
+    if not a or not b:
+        return False
+    comuns = len(a & b)
+    if comuns < _DEDUP_MIN_SHARED_WORDS:
+        return False
+    return comuns / min(len(a), len(b)) >= _DEDUP_OVERLAP_THRESHOLD
 
-    split_match = NEWS_TITLE_SUMMARY_PIPE_RE.search(rest) or NEWS_TITLE_SUMMARY_DASH_RE.search(rest)
-    if not split_match:
-        return None
 
-    titulo_pt, resumo_pt = split_match.groups()
-    return int(idx_str), titulo_pt.strip(), resumo_pt.strip()
+def dedup_same_story(items: list[dict]) -> list[dict]:
+    """Tira materias repetidas ANTES da IA ver a lista.
+
+    A dedup do banco so pega link identico, entao a mesma noticia publicada pela BBC e
+    pela Al Jazeera passava como duas candidatas - e as duas apareciam no digest. Tirar
+    antes tambem devolve espaco na lista de candidatos pra assuntos de verdade diferentes.
+    """
+    mantidos: list[dict] = []
+    for item in items:
+        if any(same_story(item["title"], mantido["title"]) for mantido in mantidos):
+            continue
+        mantidos.append(item)
+    return mantidos
+
+
+def _eco_bate(eco: str, titulo_original: str) -> bool:
+    """Confere se o item que a IA descreveu e mesmo o item do indice que ela devolveu.
+
+    Sem essa ancora, um indice trocado faz o card mostrar o titulo de uma noticia com o
+    LINK e a imagem de outra - o erro mais grave possivel aqui, porque parece certo.
+    Reproduzido na sonda contra a API real antes do campo "eco" existir.
+    """
+    a, b = _significant_words(eco), _significant_words(titulo_original)
+    if not a or not b:
+        return False
+    return len(a & b) / min(len(a), len(b)) >= 0.5
+
+
+def resolve_picked_item(pick: dict, items: list[dict]) -> dict | None:
+    """Casa uma escolha da IA com o item real da lista, validando pelo eco do titulo.
+
+    Se o indice nao bater com o eco, tenta achar por eco qual item ela quis dizer, em
+    vez de descartar - e o mesmo conteudo, so o numero que saiu errado.
+    """
+    idx = pick.get("i")
+    if isinstance(idx, str) and idx.strip().lstrip("-").isdigit():
+        idx = int(idx)
+    if not isinstance(idx, int):
+        idx = None
+
+    eco = (pick.get("eco") or "").strip()
+    if idx is not None and 0 <= idx < len(items):
+        if not eco or _eco_bate(eco, items[idx]["title"]):
+            return items[idx]
+
+    if eco:
+        for item in items:
+            if _eco_bate(eco, item["title"]):
+                log.warning("Indice %s nao bateu com o eco %r, casei pelo titulo", idx, eco[:60])
+                return item
+
+    log.warning("Escolha descartada: indice %s e eco %r nao casaram com nenhum item", idx, eco[:60])
+    return None
+
+
+def build_curated_items(payload: dict, items: list[dict]) -> list[dict]:
+    """Converte o JSON da IA na lista de itens prontos pro embed. Pura, testavel sem rede."""
+    escolhas = payload.get("noticias")
+    if not isinstance(escolhas, list):
+        raise ValueError("JSON sem a lista 'noticias'")
+
+    curados: list[dict] = []
+    ja_usados: set[str] = set()
+    for pick in escolhas:
+        if not isinstance(pick, dict):
+            continue
+        titulo_pt = (pick.get("titulo") or "").strip()
+        resumo_pt = (pick.get("resumo") or "").strip()
+        # Resumo curto demais costuma ser resposta cortada no meio - melhor descartar
+        # esse item do que mostrar algo quebrado tipo "O".
+        if len(resumo_pt) < 15:
+            continue
+
+        item_original = resolve_picked_item(pick, items)
+        if item_original is None or item_original["link"] in ja_usados:
+            continue
+
+        ja_usados.add(item_original["link"])
+        item = dict(item_original)
+        item["title_pt"] = truncate_words(titulo_pt, NEWS_TITLE_MAX_CHARS) or item["title"]
+        item["summary_pt"] = truncate_words(resumo_pt, NEWS_SUMMARY_MAX_CHARS) or item["summary"]
+        curados.append(item)
+    return curados
 
 
 async def _summarize_category(items: list[dict], interest_hint: str = "") -> list[dict]:
@@ -332,7 +445,12 @@ async def _summarize_category(items: list[dict], interest_hint: str = "") -> lis
     items_text = "\n".join(
         f"{i}. [{it['source']}] {it['title']} - {it['summary']}" for i, it in enumerate(items)
     )
-    prompt = NEWS_SUMMARY_PROMPT.format(n=min(NEWS_ITEMS_PER_CATEGORY, len(items)), items_text=items_text)
+    prompt = NEWS_SUMMARY_PROMPT.format(
+        n=min(NEWS_ITEMS_PER_CATEGORY, len(items)),
+        titulo_max=NEWS_TITLE_MAX_CHARS,
+        resumo_max=NEWS_SUMMARY_MAX_CHARS,
+        items_text=items_text,
+    )
     if interest_hint:
         prompt += (
             f"\n\nContexto extra sobre quem vai ler: perfil de anime no AniList - {interest_hint}. "
@@ -341,35 +459,19 @@ async def _summarize_category(items: list[dict], interest_hint: str = "") -> lis
             "podem entrar, nao force a conexao se nao houver."
         )
 
-    async def _try_once() -> list[dict]:
-        # max_tokens generoso: 4 itens com titulo+resumo traduzidos podem passar
-        # facil de 800 tokens e ficar cortados no meio (resumo quebrado tipo "O").
-        raw = await _complete([{"role": "user", "content": prompt}], temperature=0.4, max_tokens=1800)
-        picked = []
-        for line in raw.strip().splitlines():
-            parsed = parse_news_summary_line(line)
-            if parsed is None:
-                continue
-            idx, titulo_pt, resumo_pt = parsed
-            # Resumo suspeito demais curto costuma ser resposta cortada no meio -
-            # melhor descartar esse item do que mostrar algo quebrado tipo "O".
-            if len(resumo_pt) < 15:
-                continue
-            if 0 <= idx < len(items):
-                item = dict(items[idx])
-                item["title_pt"] = titulo_pt or item["title"]
-                item["summary_pt"] = resumo_pt or item["summary"]
-                picked.append(item)
-        return picked
-
     for attempt in range(2):
         try:
-            picked = await _try_once()
+            # JSON estrito (response_format) no lugar do formato "INDICE ||| titulo |||
+            # resumo": o separador de texto quebrava sozinho (o modelo copiava o " - "
+            # da lista de entrada) e derrubava a categoria inteira pro fallback sem
+            # traducao. Medido contra a API de producao, o JSON saiu valido em 9/9.
+            payload = await complete_json(prompt, max_tokens=1800)
+            curated = build_curated_items(payload, items)
         except Exception:
             log.exception("Erro ao resumir noticias (tentativa %s)", attempt + 1)
-            picked = []
-        if picked:
-            return picked[:NEWS_ITEMS_PER_CATEGORY]
+            curated = []
+        if curated:
+            return curated[:NEWS_ITEMS_PER_CATEGORY]
 
     log.warning("Resumo de noticias falhou 2x, mostrando itens sem traducao")
     return items[:NEWS_ITEMS_PER_CATEGORY]
@@ -379,8 +481,10 @@ def build_item_embed(category: dict, item: dict) -> discord.Embed:
     titulo = item.get("title_pt") or item["title"]
     resumo = item.get("summary_pt") or item["summary"] or "(sem resumo disponivel)"
     embed = discord.Embed(
-        title=titulo[:250],
-        description=resumo[:400],
+        # Corta na palavra em vez de no caractere: o corte seco em 250/400 deixava
+        # titulo terminando no meio de uma palavra quando o fallback sem traducao entrava.
+        title=truncate_words(titulo, NEWS_TITLE_MAX_CHARS),
+        description=truncate_words(resumo, NEWS_SUMMARY_MAX_CHARS),
         url=item["link"],
         color=category["color"],
     )
@@ -403,10 +507,13 @@ NEWS_INTRO_FALLBACKS = [
 ]
 
 
-async def build_news_intro() -> str:
-    async with ai_lock:
+async def build_news_intro(interactive: bool = False) -> str:
+    slot = ai_gate.interactive() if interactive else ai_gate.background()
+    async with slot:
         try:
-            intro = await _complete([{"role": "user", "content": NEWS_INTRO_PROMPT}], temperature=0.9, max_tokens=60)
+            intro = await _complete(
+                [{"role": "user", "content": NEWS_INTRO_PROMPT}], max_tokens=120, thinking=THINK_OFF
+            )
         except Exception:
             log.exception("Erro ao gerar introducao das noticias")
             return random.choice(NEWS_INTRO_FALLBACKS)
@@ -414,12 +521,15 @@ async def build_news_intro() -> str:
     return intro or random.choice(NEWS_INTRO_FALLBACKS)
 
 
-async def build_news_digest() -> tuple[list[tuple[dict, list[discord.Embed]]], list[str]]:
+async def build_news_digest(interactive: bool = False) -> tuple[list[tuple[dict, list[discord.Embed]]], list[str]]:
     """Retorna as secoes prontas e os rotulos das categorias que ficaram de fora.
 
     Cada categoria e isolada em try/except de proposito: antes, um erro em uma
     (feed fora do ar, banco travado, timeout da NVIDIA) derrubava a geracao inteira
     e o digest chegava truncado sem explicacao nenhuma.
+
+    `interactive` diferencia o /noticias (alguem esperando na frente da tela) do post
+    automatico do meio-dia, que cede a vez pra qualquer conversa em andamento.
     """
     loop = asyncio.get_event_loop()
     sections = []
@@ -430,10 +540,12 @@ async def build_news_digest() -> tuple[list[tuple[dict, list[discord.Embed]]], l
             interest_hint = ""
             if key == "geek":
                 interest_hint = await loop.run_in_executor(None, _fetch_anilist_interest_sync)
-            # So a chamada de IA fica dentro do lock global - o post automatico e um
+            # So a chamada de IA fica dentro do portao global - o post automatico e um
             # /noticias manual rodando ao mesmo tempo nao devem martelar a API da NVIDIA
-            # em paralelo (isso agrava 504s la e ja causou digest incompleto).
-            async with ai_lock:
+            # em paralelo (isso agrava 504s la e ja causou digest incompleto). Como o
+            # portao e por categoria, uma menção no meio do digest espera no maximo uma
+            # categoria, e nao o digest inteiro.
+            async with (ai_gate.interactive() if interactive else ai_gate.background()):
                 curated = await _summarize_category(raw_items, interest_hint)
         except Exception:
             log.exception("Erro ao montar a categoria %s", category["label"])
@@ -458,13 +570,13 @@ def find_news_channel(guild: discord.Guild) -> discord.TextChannel | None:
     return None
 
 
-async def post_news_digest(channel: discord.TextChannel):
+async def post_news_digest(channel: discord.TextChannel, interactive: bool = False):
     placeholder = await channel.send(
         embed=thinking_embed(
             "📰 Buscando e resumindo as noticias do dia...", eta_seconds=NEWS_THINKING_ETA_SECONDS
         )
     )
-    sections, skipped = await build_news_digest()
+    sections, skipped = await build_news_digest(interactive=interactive)
     if not sections:
         await placeholder.edit(
             content="Nao encontrei noticias relevantes nas ultimas horas, tento de novo mais tarde.",
@@ -472,7 +584,7 @@ async def post_news_digest(channel: discord.TextChannel):
         )
         return
     today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
-    intro = await build_news_intro()
+    intro = await build_news_intro(interactive=interactive)
     
     header_embed = discord.Embed(description=f"**{intro}**", color=discord.Color.purple())
     header_embed.set_author(name=f"Resumo de Notícias — {today}", icon_url=channel.guild.me.display_avatar.url)
@@ -531,7 +643,7 @@ class NewsCog(commands.Cog):
             "📰 Preparando o resumo de noticias, ja chega no canal...", ephemeral=True
         )
         try:
-            await post_news_digest(interaction.channel)
+            await post_news_digest(interaction.channel, interactive=True)
         except Exception:
             log.exception("Erro ao gerar resumo de noticias sob demanda")
             await interaction.channel.send("Deu erro ao gerar o resumo de noticias, tenta de novo.")

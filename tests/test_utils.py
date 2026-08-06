@@ -1,4 +1,76 @@
-from utils import looks_like_question, TTLCache
+from utils import (
+    looks_like_question,
+    mentions_solenne,
+    split_discord_message,
+    truncate_words,
+    TTLCache,
+)
+
+
+def test_mentions_solenne_pelo_nome_no_meio_da_frase():
+    """O gesto mais natural - chamar pelo nome - era justamente o que nao funcionava:
+    sem @ e sem "?", a mensagem nao passava por nenhum gatilho e ela ficava muda."""
+    assert mentions_solenne("solenne o que voce acha disso") is True
+    assert mentions_solenne("Ei Solenne, me ajuda aqui") is True
+    assert mentions_solenne("soleninha me explica") is True
+
+
+def test_mentions_solenne_ignora_palavra_parecida():
+    assert mentions_solenne("insolente do caramba") is False
+    assert mentions_solenne("que sol quente hoje") is False
+    assert mentions_solenne("") is False
+
+
+def test_mentions_solenne_ignora_nome_dentro_de_url():
+    """Colar o link do repo no chat nao pode acordar a Solenne."""
+    assert mentions_solenne("olha https://github.com/luizhc06/Solenne") is False
+
+
+def test_looks_like_question_aceita_pergunta_sem_interrogacao():
+    """Quase ninguem digita "?" no Discord - exigir o literal fazia o modo ambiente
+    perder a maioria das perguntas de verdade."""
+    assert looks_like_question("alguem sabe se vai chover amanha") is True
+    assert looks_like_question("qual o melhor mouse ate 200 reais") is True
+    assert looks_like_question("me explica como funciona isso ai") is True
+
+
+def test_looks_like_question_ainda_ignora_afirmacao():
+    assert looks_like_question("acabei de comprar um teclado novo") is False
+
+
+def test_truncate_words_nao_corta_no_meio_da_palavra():
+    texto = "Dois tripulantes morrem em colisao de helicopteros de combate a incendios"
+    cortado = truncate_words(texto, 40)
+    assert len(cortado) <= 40
+    assert cortado.endswith("…")
+    assert cortado[:-1].strip() in texto
+
+
+def test_truncate_words_deixa_texto_curto_intacto():
+    assert truncate_words("Titulo curto", 90) == "Titulo curto"
+
+
+def test_split_discord_message_prefere_quebra_de_linha():
+    texto = "x" * 50 + "\n" + "y" * 100
+    partes = split_discord_message(texto, limit=60)
+    assert partes[0] == "x" * 50
+    assert partes[1].startswith("y")
+    assert all(len(p) <= 60 for p in partes)
+
+
+def test_split_discord_message_ignora_quebra_cedo_demais():
+    """Quebrar num "\\n" logo no comeco desperdicaria o resto do limite e picotaria a
+    resposta em mensagens minusculas - so vale a pena depois da metade."""
+    partes = split_discord_message("titulo\n" + "x" * 100, limit=60)
+    assert len(partes[0]) == 60
+
+
+def test_split_discord_message_nunca_devolve_pedaco_vazio():
+    """Mandar string vazia pro Discord levanta HTTPException DEPOIS do try/except do
+    cog: a resposta some sem erro visivel. Era uma das causas do "nao respondeu"."""
+    assert split_discord_message("") == []
+    assert split_discord_message("   \n  ") == []
+    assert all(p.strip() for p in split_discord_message("a" * 5000))
 
 
 def test_looks_like_question_true_for_real_question():

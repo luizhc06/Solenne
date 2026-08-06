@@ -19,12 +19,72 @@ def is_ambient_channel(channel) -> bool:
     return any(target in name for target in AMBIENT_CHANNEL_NAMES)
 
 
+# Como as pessoas chamam a Solenne no meio da frase, sem marcar com @. Aceita
+# variacao e diminutivo ("solene", "soleninha"), mas exige limite de palavra a
+# esquerda pra nao casar no meio de outra palavra. Deliberadamente NAO aceita "sol"
+# sozinho: e palavra comum demais em portugues pra virar gatilho.
+NAME_TRIGGER_RE = re.compile(r"(?<![\wÀ-ÿ])solen\w*", re.IGNORECASE)
+
+# Perguntas de verdade que nao terminam com "?" - o gatilho antigo exigia o "?"
+# literal, entao "solenne me explica isso" e "alguem sabe se vai chover" passavam
+# batido e a Solenne parecia estar ignorando as pessoas.
+QUESTION_WORDS_RE = re.compile(
+    r"(?<![\wÀ-ÿ])(qual|quais|quem|quando|onde|como|por\s*que|porque|pq|quanto|quantos|quantas|"
+    r"o\s*que|oq|sera|alguem\s+sabe|algum\s+de\s+voces|explica|explique|me\s+explica|"
+    r"me\s+diz|sabe\s+se|da\s+pra|vale\s+a\s+pena|recomenda|ajuda\s+ai)(?![\wÀ-ÿ])",
+    re.IGNORECASE,
+)
+
+
+def mentions_solenne(content: str) -> bool:
+    """Se a mensagem chama a Solenne pelo nome (sem @), tipo "solenne, o que voce acha"."""
+    return bool(NAME_TRIGGER_RE.search(URL_PATTERN.sub("", content or "")))
+
+
 def looks_like_question(content: str) -> bool:
-    content = content.strip()
+    content = (content or "").strip()
     if content.startswith("/"):
         return False
     without_urls = URL_PATTERN.sub("", content)
-    return "?" in without_urls and len(content) > 6
+    if len(content) <= 6:
+        return False
+    return "?" in without_urls or bool(QUESTION_WORDS_RE.search(without_urls))
+
+
+def truncate_words(text: str, limit: int) -> str:
+    """Corta no espaco anterior ao limite, com reticencias - nunca no meio da palavra."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    corte = text[:limit - 1]
+    espaco = corte.rfind(" ")
+    if espaco > limit * 0.6:
+        corte = corte[:espaco]
+    return corte.rstrip(" ,;:.-") + "…"
+
+
+def split_discord_message(text: str, limit: int = 1900) -> list[str]:
+    """Fatia uma resposta longa respeitando quebras de linha e espacos.
+
+    O corte antigo era em fatias fixas de 1900 caracteres, o que partia palavra,
+    link e bloco de codigo no meio. Tambem garante pelo menos um pedaco nao vazio:
+    mandar string vazia pro Discord levanta HTTPException e a resposta some.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    pedacos = []
+    while len(text) > limit:
+        corte = text.rfind("\n", 0, limit)
+        if corte < limit * 0.5:
+            corte = text.rfind(" ", 0, limit)
+        if corte < limit * 0.5:
+            corte = limit
+        pedacos.append(text[:corte].strip())
+        text = text[corte:].strip()
+    if text:
+        pedacos.append(text)
+    return [p for p in pedacos if p]
 
 
 def thinking_embed(text: str | None = None, eta_seconds: int = THINKING_ETA_SECONDS) -> discord.Embed:

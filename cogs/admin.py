@@ -8,7 +8,7 @@ from discord.ext import commands
 
 from config import OWNER_USER_ID
 from notify import notify_owner_text
-from ai_client import ai_lock, _complete
+from ai_client import ai_gate, _complete
 
 log = logging.getLogger("hermes-bot")
 
@@ -63,7 +63,7 @@ dessa resposta - sem ser ofensiva, sem sair do personagem. Responda somente com 
 
 async def _perturbar_comeback(resposta: str, nome: str) -> str:
     prompt = PERTURBAR_COMEBACK_PROMPT.format(nome=nome, resposta=resposta[:300])
-    return await _complete([{"role": "user", "content": prompt}], temperature=0.9, max_tokens=100)
+    return await _complete([{"role": "user", "content": prompt}], max_tokens=100)
 
 
 class AdminCog(commands.Cog):
@@ -224,7 +224,7 @@ class AdminCog(commands.Cog):
             except asyncio.TimeoutError:
                 continue
             try:
-                async with ai_lock:
+                async with ai_gate.interactive():
                     comeback = await _perturbar_comeback(reply_msg.content, usuario.display_name)
                 if not comeback or not comeback.strip():
                     # A IA as vezes recusa/esvazia a resposta (ex: reply com palavrao

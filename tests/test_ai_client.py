@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 from openai import (
@@ -8,7 +10,93 @@ from openai import (
     RateLimitError,
 )
 
-from ai_client import is_transient_ai_error, friendly_ai_error
+from ai_client import (
+    EmptyAIResponse,
+    PriorityGate,
+    THINK_BUDGET,
+    THINK_LOW,
+    THINK_OFF,
+    clean_reply,
+    friendly_ai_error,
+    is_transient_ai_error,
+    parse_json_payload,
+    thinking_kwargs,
+)
+
+
+def test_thinking_off_desliga_o_raciocinio():
+    assert thinking_kwargs(THINK_OFF) == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_thinking_budget_liga_o_raciocinio_com_teto():
+    """O centro da correcao: ate ago/2026 TODA chamada mandava enable_thinking=False,
+    o que transforma um modelo de raciocinio num modelo de 12B que responde de primeira."""
+    kwargs = thinking_kwargs(THINK_BUDGET, budget=512)["chat_template_kwargs"]
+    assert kwargs["enable_thinking"] is True
+    assert kwargs["reasoning_budget"] == 512
+
+
+def test_thinking_low_usa_low_effort():
+    kwargs = thinking_kwargs(THINK_LOW)["chat_template_kwargs"]
+    assert kwargs == {"enable_thinking": True, "low_effort": True}
+
+
+def test_clean_reply_tira_tag_de_raciocinio_e_prefixo_de_nome():
+    """Se o backend nao separar o trace em reasoning_content, ele vem como <think> no
+    texto; e o modelo as vezes assina a fala com o proprio nome. Nada disso vai pro chat."""
+    assert clean_reply("<think>hmm deixa eu ver</think>\nSolenne: oi, tudo certo") == "oi, tudo certo"
+    assert clean_reply("resposta normal") == "resposta normal"
+
+
+def test_parse_json_payload_aceita_cerca_de_codigo():
+    assert parse_json_payload('```json\n{"noticias": []}\n```') == {"noticias": []}
+
+
+def test_parse_json_payload_resgata_json_com_texto_em_volta():
+    assert parse_json_payload('Claro! {"noticias": [1]} espero ter ajudado') == {"noticias": [1]}
+
+
+def test_parse_json_payload_falha_sem_json():
+    with pytest.raises(ValueError):
+        parse_json_payload("nao tem json nenhum aqui")
+
+
+def test_resposta_vazia_nao_e_retentada():
+    """Repetir a mesma chamada da o mesmo resultado (o raciocinio estourou o
+    max_tokens): quem trata e o chamador, refazendo com outros parametros."""
+    assert is_transient_ai_error(EmptyAIResponse("vazio")) is False
+
+
+def test_resposta_vazia_tem_mensagem_propria_no_discord():
+    msg = friendly_ai_error(EmptyAIResponse("vazio"))
+    assert "Deu ruim" not in msg
+    assert msg.strip()
+
+
+def test_priority_gate_deixa_o_chat_passar_na_frente_do_digest():
+    """Enquanto o digest de noticias roda, uma mencao ficava presa atras dele na fila
+    FIFO e a pessoa via so o "Pensando..." parado por minutos."""
+    async def cenario():
+        gate = PriorityGate()
+        ordem = []
+
+        async def fundo():
+            async with gate.background():
+                ordem.append("digest")
+
+        async def chat():
+            async with gate.interactive():
+                ordem.append("chat")
+
+        async with gate.background():  # primeira categoria do digest, ja rodando
+            tarefa_fundo = asyncio.create_task(fundo())
+            await asyncio.sleep(0)  # o digest entra na fila primeiro
+            tarefa_chat = asyncio.create_task(chat())
+            await asyncio.sleep(0)
+        await asyncio.gather(tarefa_fundo, tarefa_chat)
+        return ordem
+
+    assert asyncio.run(cenario()) == ["chat", "digest"]
 
 
 def _status_error(code: int):
