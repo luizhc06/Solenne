@@ -119,11 +119,19 @@ def test_transient_errors_are_retried(exc):
     assert is_transient_ai_error(exc) is True
 
 
-@pytest.mark.parametrize("exc", [_status_error(401), _status_error(400), _status_error(404), ValueError("x")])
+@pytest.mark.parametrize("exc", [_status_error(401), _status_error(400), _status_error(403), ValueError("x")])
 def test_definitive_errors_are_not_retried(exc):
-    """Chave invalida ou modelo inexistente nao melhora tentando de novo -
+    """Chave invalida ou pedido malformado nao melhora tentando de novo -
     retentar so faz a pessoa esperar mais pelo mesmo erro."""
     assert is_transient_ai_error(exc) is False
+
+
+def test_404_e_tratado_como_soluco_e_retentado():
+    """Visto em producao (06/08/2026): duas tentativas seguidas da mesma categoria de
+    noticias tomaram 404 enquanto as outras cinco do MESMO digest voltaram 200, e a
+    reproducao minutos depois passou 6/6 com prompt identico. 404 aqui e roteamento do
+    NIM engasgando, nao modelo inexistente - e sem retry derrubava a categoria inteira."""
+    assert is_transient_ai_error(_status_error(404)) is True
 
 
 def test_friendly_message_distinguishes_auth_from_transient():
