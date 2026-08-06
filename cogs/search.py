@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from db import save_message
-from ai_client import _complete
+from ai_client import _complete, THINK_LOW
 from utils import thinking_embed
 from views import FeedbackView
 
@@ -83,7 +83,7 @@ async def _synthesize_search(query: str, results: list[dict]) -> str:
         f"[{i + 1}] {r['title']} - {r['snippet']}" for i, r in enumerate(results)
     )
     prompt = SEARCH_SYNTHESIS_PROMPT.format(query=query, results_text=results_text)
-    return await _complete([{"role": "user", "content": prompt}], temperature=0.4)
+    return await _complete([{"role": "user", "content": prompt}], max_tokens=1200, thinking=THINK_LOW)
 
 
 def build_search_embed(results: list[dict]) -> discord.Embed:

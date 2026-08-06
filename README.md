@@ -44,19 +44,30 @@ compartilhada em modulos de nivel superior:
   2.2x a vazao do anterior e superior a ele nos benchmarks da classe; a motivacao foi
   latencia, ja que cada resposta custa varias chamadas sequenciais). O modelo e so a
   env `HERMES_MODEL`, entao trocar de novo nao exige mudanca de codigo.
-  Persona propria (ver `SYSTEM_PROMPT` em `cogs/chat.py`) e raciocinio em
-  multiplas passadas (rascunho, autocritica/refino e humanizacao) antes de responder.
-  Sao `REFINEMENT_ROUNDS + 2` chamadas sequenciais por resposta, todas segurando o lock
-  global — por isso o padrao caiu de 3 refinos (5 chamadas) pra 1 (3 chamadas): a fila
-  andava devagar e cada chamada extra era mais uma chance de 504 da NVIDIA no meio.
+  Persona propria (ver `SYSTEM_PROMPT` em `cogs/chat.py`) e **raciocinio nativo do
+  modelo** (`enable_thinking` + `reasoning_budget`): UMA chamada por resposta, com a
+  cadeia de pensamento voltando num campo separado (`reasoning_content`) que nunca chega
+  ao chat. Ate ago/2026 o bot mandava `enable_thinking=False` em toda chamada e compensava
+  com 3 passadas artesanais (rascunho -> autocritica -> humanizacao) — o que na pratica
+  rebaixava um modelo de raciocinio a um modelo de 12B respondendo de primeira, e ainda
+  custava ~66s por resposta contra ~20-45s hoje. As passadas antigas continuam disponiveis
+  por env (`REFINEMENT_ROUNDS`, `HUMANIZE_PASS`), desligadas por padrao.
+- **Como falar com ela**: mencionando (`@Solenne`), **respondendo (reply) uma mensagem
+  dela** ou **chamando pelo nome** no meio da frase (`solenne, o que voce acha?`). Os dois
+  ultimos nao existiam e eram justamente os gestos mais naturais — sem eles a Solenne
+  parecia ignorar as pessoas.
 - **Modo ambiente**: em canais especificos (`geral`, `comidas`, `bot`, `videojogos-geral`),
   o bot responde perguntas sem precisar ser mencionado, com cooldown de 3 minutos por canal
-  para nao estourar o limite de requisicoes da API.
+  para nao estourar o limite de requisicoes da API. Reconhece pergunta pelo `?` **ou** por
+  palavra interrogativa (`qual`, `alguem sabe`, `me explica`...) — exigir o `?` literal
+  fazia perder a maioria das perguntas reais do Discord.
 - **Memoria persistente**: historico de conversa por canal (SQLite, sobrevive a restart) e
   um resumo curto por pessoa, atualizado automaticamente em segundo plano com fatos uteis
   (preferencias, contexto recorrente).
-- Fila global de respostas: so processa um pedido de IA por vez, sem atropelar respostas
-  quando varias pessoas usam comandos ao mesmo tempo.
+- Fila global de respostas com prioridade: so processa um pedido de IA por vez, e o que
+  tem gente esperando (chat, comandos) passa na frente de tarefa de fundo (digest de
+  noticias). Com fila FIFO simples, quem mencionava a Solenne durante o digest do meio-dia
+  ficava minutos preso atras dele vendo so o "Pensando...".
 - Indicador de "pensando" (embed com GIF e estimativa de tempo) enquanto gera a resposta.
 - Nunca responde mensagens recebidas em DM.
 - Sabe a data/hora atual (Brasilia) em todo pedido, pra nao "alucinar" datas/dias da semana.
@@ -97,8 +108,9 @@ compartilhada em modulos de nivel superior:
   em um canal com "noticias" no nome. Divisorias por categoria usam heading (`#`) do Discord.
 - Fontes reais via RSS (nunca inventadas): Geek & Anime (Anime News Network, MyAnimeList),
   Tecnologia & Hardware (Tom's Hardware, Wccftech), Ciencia (ScienceDaily, Nature),
-  Inteligencia Artificial (MIT Tech Review, TechCrunch AI), Brasil (G1, G1 Politica) e
-  Mundo/Geopolitica (BBC, Al Jazeera).
+  Inteligencia Artificial (MIT Tech Review, TechCrunch AI), Brasil (G1, G1 Economia) e
+  Mundo/Geopolitica (BBC, Al Jazeera). G1 Politica saiu em ago/2026: com o G1 geral ja
+  cheio de politica, a categoria "Brasil" do dia virava so Brasilia.
 - **Feed que "morre calado" e um risco recorrente aqui**: um veiculo aposenta a URL mas ela
   continua respondendo 200 com materia velha, entao nada falha — a categoria so fica pobre.
   Ja aconteceu com `g1.globo.com/dynamo/brasil` (parou em mai/2023) e com
@@ -111,14 +123,28 @@ compartilhada em modulos de nivel superior:
   timeout, e um feed lento pendurava a thread e travava o digest todo.
 - Categoria que falha ou fica vazia e reportada no fim do post em vez de sumir calada,
   e um erro numa categoria nao derruba mais as outras.
-- Titulo e resumo traduzidos/resumidos para PT-BR pela IA a partir do texto real do feed,
-  com link da fonte original sempre presente.
+- **Curadoria em JSON estrito** (`response_format=json_object`, raciocinio desligado): 3
+  cards por categoria, titulo de ate 90 caracteres so com o fato principal e resumo de uma
+  frase, ambos em PT-BR a partir do texto real do feed, com link da fonte sempre presente.
+  O formato anterior era uma linha de texto `INDICE ||| titulo ||| resumo` — o modelo
+  trocava o segundo separador pelo `-` que via na lista de ENTRADA e a categoria inteira
+  caia pro fallback sem traducao. Medido contra a API de producao, o JSON saiu valido 9/9.
+- **Ancora anti-troca-de-link**: junto de cada escolha a IA devolve um `eco` (as 5
+  primeiras palavras do titulo original). Se o indice nao bater com o eco, o item e
+  recuperado pelo eco em vez de aceito — sem isso um indice trocado gera o pior erro
+  possivel aqui: card com o titulo de uma noticia e o LINK e a imagem de outra, parecendo
+  perfeitamente correto. Reproduzido contra a API real antes da ancora existir.
+- **Raciocinio fica DESLIGADO na curadoria de proposito**: medido em producao, com
+  `low_effort` ligado o modelo devolve JSON valido mas deixa os resumos em ingles; com
+  raciocinio desligado, traduz certo.
 - **Personalizacao da categoria Geek & Anime**: busca o perfil publico do dono no
   [AniList](https://anilist.co/) (generos favoritos e series bem avaliadas, cache de 12h)
   e usa isso pra priorizar noticias relacionadas na hora de escolher as mais relevantes,
   sem excluir noticias importantes fora do perfil.
-- **Deduplicacao**: noticias ja mostradas nos ultimos 2 dias nao repetem entre o post
-  automatico e execucoes manuais do `/noticias`.
+- **Deduplicacao em duas camadas**: por link, noticias ja mostradas nos ultimos 2 dias nao
+  repetem entre o post automatico e execucoes manuais do `/noticias`; e por conteudo, a
+  MESMA materia publicada por duas fontes (links diferentes, fato identico) e reduzida a
+  uma antes mesmo da IA ver a lista de candidatos.
 
 ### Clima
 - `/clima <cidade>`: temperatura atual, sensacao termica, umidade e previsao dos proximos
@@ -173,7 +199,9 @@ Ver `.env.example`. Copie para `.env` e preencha:
 | `HERMES_MODEL` | Modelo usado no NIM (padrao: `nvidia/nemotron-3-super-120b-a12b`) |
 | `ALLOWED_GUILD_ID` | ID do unico servidor onde o bot pode ficar |
 | `OWNER_USER_ID` | Seu ID de usuario no Discord (dono, recebe DMs de moderacao/seguranca) |
-| `REFINEMENT_ROUNDS` | Passadas de refino por resposta (padrao `1`, total = valor + 2 chamadas) |
+| `AI_REASONING_BUDGET` | Teto de tokens de raciocinio por resposta de chat (padrao `768`; mais = mais profundo e mais lento) |
+| `REFINEMENT_ROUNDS` | Passadas extras de autocritica por resposta (padrao `0` — o raciocinio nativo ja faz esse papel) |
+| `HUMANIZE_PASS` | `1` liga uma passada final de reescrita "mais humana" (padrao `0`, custa +1 chamada) |
 | `ANILIST_USERNAME` | Perfil publico do AniList usado nas noticias geek e no radar de anime (padrao `Rizuw`) |
 
 ## Deploy
