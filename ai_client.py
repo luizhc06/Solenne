@@ -163,7 +163,17 @@ def is_transient_ai_error(exc: Exception) -> bool:
     if isinstance(exc, (APITimeoutError, APIConnectionError, RateLimitError)):
         return True
     if isinstance(exc, APIStatusError):
-        return exc.status_code >= 500 or exc.status_code == 429
+        # 404 num POST pra /chat/completions com modelo que existe nao e "nao
+        # encontrado": e soluco do roteamento do NIM. Visto em producao em 06/08/2026 -
+        # duas tentativas seguidas da mesma categoria de noticias tomaram 404 enquanto
+        # as outras cinco do MESMO digest voltaram 200, e a reproducao minutos depois
+        # passou 6/6 com prompt e parametros identicos. Como nao era retentado, o soluco
+        # derrubava a categoria inteira pro fallback sem traducao.
+        #
+        # Se HERMES_MODEL estiver de fato errado, isso vira 3 tentativas antes de
+        # desistir - alguns segundos a mais num erro que ja seria fatal de qualquer
+        # forma, e o corpo da resposta vai pro log pra distinguir os dois casos.
+        return exc.status_code >= 500 or exc.status_code in (404, 429)
     return False
 
 
@@ -243,6 +253,11 @@ async def _complete(
             if not is_transient_ai_error(exc):
                 raise
             last_error = exc
+            # 404 e ambiguo (soluco do NIM x HERMES_MODEL errado): loga o corpo da
+            # resposta pra dar pra distinguir os dois casos so pelo log.
+            if isinstance(exc, APIStatusError) and exc.status_code == 404:
+                corpo = getattr(getattr(exc, "response", None), "text", "")
+                log.warning("404 da API. Corpo: %s", (corpo or "(vazio)")[:300])
             if attempt < AI_MAX_ATTEMPTS - 1:
                 delay = AI_RETRY_BASE_DELAY_SECONDS * (2**attempt)
                 log.warning(

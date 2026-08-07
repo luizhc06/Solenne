@@ -37,6 +37,13 @@ NEWS_CANDIDATES_PER_CATEGORY = NEWS_ITEMS_PER_CATEGORY * 4
 NEWS_TITLE_MAX_CHARS = 90
 NEWS_SUMMARY_MAX_CHARS = 300
 
+# Tentativas de curadoria por categoria, com pausa entre elas. Antes eram 2 seguidas,
+# sem intervalo: um soluco de poucos segundos na API pegava as duas e a categoria caia
+# pro fallback sem traducao. As retentativas de dentro do _complete cuidam do erro
+# transitorio de rede; estas aqui cuidam de resposta que chegou mas veio inutil.
+NEWS_SUMMARY_ATTEMPTS = 2
+NEWS_SUMMARY_RETRY_DELAY_SECONDS = 5
+
 # feedparser.parse(url) baixa por conta propria, com socket sem timeout - um feed
 # lento pendura a thread do executor e trava o digest inteiro. Baixamos com httpx
 # (que tem timeout) e entregamos os bytes ja prontos pro feedparser.
@@ -459,7 +466,7 @@ async def _summarize_category(items: list[dict], interest_hint: str = "") -> lis
             "podem entrar, nao force a conexao se nao houver."
         )
 
-    for attempt in range(2):
+    for attempt in range(NEWS_SUMMARY_ATTEMPTS):
         try:
             # JSON estrito (response_format) no lugar do formato "INDICE ||| titulo |||
             # resumo": o separador de texto quebrava sozinho (o modelo copiava o " - "
@@ -472,6 +479,10 @@ async def _summarize_category(items: list[dict], interest_hint: str = "") -> lis
             curated = []
         if curated:
             return curated[:NEWS_ITEMS_PER_CATEGORY]
+        if attempt < NEWS_SUMMARY_ATTEMPTS - 1:
+            # Sem essa pausa as duas tentativas caiam dentro do mesmo soluco da API e
+            # falhavam juntas - foi o que aconteceu em producao em 06/08/2026.
+            await asyncio.sleep(NEWS_SUMMARY_RETRY_DELAY_SECONDS)
 
     log.warning("Resumo de noticias falhou 2x, mostrando itens sem traducao")
     return items[:NEWS_ITEMS_PER_CATEGORY]
