@@ -13,8 +13,14 @@ from discord.ext import commands, tasks
 
 from config import ALLOWED_GUILD_ID, NEWS_TIMEZONE, ANILIST_USERNAME
 from db import filter_unposted_links, mark_news_posted
-from ai_client import ai_gate, _complete, complete_json, THINK_OFF
-from utils import thinking_embed, NEWS_THINKING_ETA_SECONDS, TTLCache, truncate_words
+from ai_client import ai_gate, complete_json
+from utils import (
+    thinking_embed,
+    NEWS_THINKING_ETA_SECONDS,
+    TTLCache,
+    truncate_sentences,
+    truncate_words,
+)
 from views import FeedbackView
 from notify import notify_owner_text
 
@@ -23,13 +29,15 @@ log = logging.getLogger("hermes-bot")
 NEWS_CHANNEL_NAME = "noticias"
 NEWS_POST_TIME = dtime(hour=12, minute=0, tzinfo=NEWS_TIMEZONE)
 NEWS_LOOKBACK_HOURS = 30
-# 3 por categoria x 6 categorias = 18 cards. Era 4 (24 cards): o digest virava uma
-# parede de rolagem e as manchetes menos relevantes diluiam as que importavam.
-NEWS_ITEMS_PER_CATEGORY = 3
-# Quantos candidatos a IA recebe pra escolher. Precisa ser bem maior que
-# NEWS_ITEMS_PER_CATEGORY, senao ela nao tem de onde escolher e o "mais relevante"
-# vira so "os primeiros do feed".
-NEWS_CANDIDATES_PER_CATEGORY = NEWS_ITEMS_PER_CATEGORY * 4
+# TETO por categoria, nao cota fixa. Antes eram 3 cards sempre, em toda categoria, todo
+# dia - o digest nao distinguia "hoje aconteceu algo grande" de "hoje nao aconteceu
+# nada" e completava dia fraco com enchimento. Agora a IA devolve de 0 a 4 conforme a
+# relevancia real, e categoria vazia e reportada como "nada que valesse a pena" em vez
+# de virar tres manchetes mornas.
+NEWS_MAX_ITEMS_PER_CATEGORY = 4
+# Quantos candidatos a IA recebe pra escolher. Precisa ser bem maior que o teto,
+# senao ela nao tem de onde escolher e o "mais relevante" vira so "os primeiros do feed".
+NEWS_CANDIDATES_PER_CATEGORY = NEWS_MAX_ITEMS_PER_CATEGORY * 3
 
 # Limites do que sai no card. Titulo curto e o pedido central: o modelo tende a
 # traduzir a manchete inteira, com subtitulo e aposto, e o embed virava um paragrafo
@@ -134,6 +142,7 @@ def _summarize_anilist_entries(entries: list[dict]) -> str:
 NEWS_CATEGORIES = {
     "geek": {
         "label": "🎌 Geek & Anime",
+        "foco": "anime, manga, jogos e cultura geek",
         "color": discord.Color.blue(),
         "feeds": [
             ("Anime News Network", "https://www.animenewsnetwork.com/newsfeed/rss.xml"),
@@ -142,6 +151,7 @@ NEWS_CATEGORIES = {
     },
     "tecnologia": {
         "label": "💻 Tecnologia & Hardware",
+        "foco": "hardware, componentes, PCs, consoles e a industria de tecnologia",
         "color": discord.Color.dark_blue(),
         "feeds": [
             ("Tom's Hardware", "https://www.tomshardware.com/feeds/all"),
@@ -150,6 +160,7 @@ NEWS_CATEGORIES = {
     },
     "ciencia": {
         "label": "🔬 Ciencia",
+        "foco": "descobertas cientificas, pesquisa, saude e medicina",
         "color": discord.Color.green(),
         "feeds": [
             ("ScienceDaily", "https://www.sciencedaily.com/rss/all.xml"),
@@ -158,6 +169,7 @@ NEWS_CATEGORIES = {
     },
     "ia": {
         "label": "🤖 Inteligencia Artificial",
+        "foco": "inteligencia artificial: modelos, empresas de IA, pesquisa e regulacao do setor",
         "color": discord.Color.purple(),
         # O feed venturebeat.com/category/ai congelou em maio/2026 (mesmo caso do antigo
         # G1 Brasil: responde 200, mas so com materia velha). Trocado por TechCrunch AI.
@@ -168,6 +180,7 @@ NEWS_CATEGORIES = {
     },
     "brasil": {
         "label": "🇧🇷 Brasil",
+        "foco": "acontecimentos NO Brasil ou que afetam diretamente o Brasil. Noticia de outro pais que so foi publicada por um veiculo brasileiro NAO conta",
         "color": discord.Color.gold(),
         # ATENCAO: o antigo feed "dynamo/brasil/rss2.xml" responde 200 mas esta
         # congelado desde maio/2023 - todo item caia fora do cutoff e a categoria
@@ -185,6 +198,7 @@ NEWS_CATEGORIES = {
     },
     "mundo": {
         "label": "🌍 Mundo, Guerras & Governos",
+        "foco": "geopolitica, guerras, conflitos e governos fora do Brasil",
         "color": discord.Color.red(),
         "feeds": [
             ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml"),
@@ -301,7 +315,13 @@ def _collect_category_items(category: dict) -> list[dict]:
 NEWS_SUMMARY_PROMPT = """Voce e a curadoria de noticias da Solenne. Abaixo esta uma lista numerada de
 noticias reais de uma categoria (titulo + resumo original, podem estar em ingles).
 
-Escolha as {n} MAIS relevantes e importantes, em ordem de importancia. Regras:
+Esta categoria e sobre: {foco}. Descarte o que nao encaixa nesse foco, mesmo que seja noticia
+importante - o feed as vezes traz assunto de fora e a materia provavelmente cabe em outra categoria.
+
+Escolha ATE {n} das mais relevantes e importantes, em ordem de importancia. {n} e um TETO, nao uma
+cota: seja exigente. Se so 1 ou 2 merecerem de verdade, devolva so 1 ou 2. Se NENHUMA for relevante
+(so materia morna, fofoca, publicidade, lista de ofertas), devolva a lista vazia - dia fraco existe,
+e dizer isso e melhor do que encher com noticia que ninguem quer ler. Regras:
 - Se duas entradas forem sobre o MESMO fato, use so uma delas (a de melhor resumo) e descarte a outra.
 - Descarte o que nao for noticia de verdade (publicidade, "melhores ofertas", lista de cupom, promocao).
 - "i": o numero EXATO do item na lista abaixo (comecando em 0).
@@ -389,11 +409,20 @@ def _eco_bate(eco: str, titulo_original: str) -> bool:
     return len(a & b) / min(len(a), len(b)) >= 0.5
 
 
-def resolve_picked_item(pick: dict, items: list[dict]) -> dict | None:
+def _titulo_original(item: dict) -> str:
+    return item["title"]
+
+
+def resolve_picked_item(pick: dict, items: list[dict], titulo_de=_titulo_original) -> dict | None:
     """Casa uma escolha da IA com o item real da lista, validando pelo eco do titulo.
 
     Se o indice nao bater com o eco, tenta achar por eco qual item ela quis dizer, em
     vez de descartar - e o mesmo conteudo, so o numero que saiu errado.
+
+    `titulo_de` diz contra qual titulo comparar o eco, porque isso muda com o momento:
+    na curadoria a IA le os titulos ORIGINAIS (em ingles) e ecoa deles; na escolha do
+    destaque do dia ela ja le os titulos traduzidos. Comparar com o titulo errado faz
+    todo eco falhar em silencio.
     """
     idx = pick.get("i")
     if isinstance(idx, str) and idx.strip().lstrip("-").isdigit():
@@ -403,12 +432,12 @@ def resolve_picked_item(pick: dict, items: list[dict]) -> dict | None:
 
     eco = (pick.get("eco") or "").strip()
     if idx is not None and 0 <= idx < len(items):
-        if not eco or _eco_bate(eco, items[idx]["title"]):
+        if not eco or _eco_bate(eco, titulo_de(items[idx])):
             return items[idx]
 
     if eco:
         for item in items:
-            if _eco_bate(eco, item["title"]):
+            if _eco_bate(eco, titulo_de(item)):
                 log.warning("Indice %s nao bateu com o eco %r, casei pelo titulo", idx, eco[:60])
                 return item
 
@@ -446,14 +475,15 @@ def build_curated_items(payload: dict, items: list[dict]) -> list[dict]:
     return curados
 
 
-async def _summarize_category(items: list[dict], interest_hint: str = "") -> list[dict]:
+async def _summarize_category(items: list[dict], interest_hint: str = "", foco: str = "") -> list[dict]:
     if not items:
         return []
     items_text = "\n".join(
         f"{i}. [{it['source']}] {it['title']} - {it['summary']}" for i, it in enumerate(items)
     )
     prompt = NEWS_SUMMARY_PROMPT.format(
-        n=min(NEWS_ITEMS_PER_CATEGORY, len(items)),
+        n=min(NEWS_MAX_ITEMS_PER_CATEGORY, len(items)),
+        foco=foco or "o assunto da categoria",
         titulo_max=NEWS_TITLE_MAX_CHARS,
         resumo_max=NEWS_SUMMARY_MAX_CHARS,
         items_text=items_text,
@@ -473,19 +503,25 @@ async def _summarize_category(items: list[dict], interest_hint: str = "") -> lis
             # da lista de entrada) e derrubava a categoria inteira pro fallback sem
             # traducao. Medido contra a API de producao, o JSON saiu valido em 9/9.
             payload = await complete_json(prompt, max_tokens=1800)
+            escolhas_brutas = payload.get("noticias") or []
             curated = build_curated_items(payload, items)
         except Exception:
             log.exception("Erro ao resumir noticias (tentativa %s)", attempt + 1)
-            curated = []
-        if curated:
-            return curated[:NEWS_ITEMS_PER_CATEGORY]
+        else:
+            # Lista vazia PEDIDA pela IA ("nao teve nada relevante hoje") e resposta
+            # valida, nao falha - nao retenta nem cai pro fallback. Ja lista cheia que
+            # ficou vazia depois da validacao (eco que nao casou, resumo truncado) e
+            # falha de verdade e merece outra tentativa.
+            if curated or not escolhas_brutas:
+                return curated[:NEWS_MAX_ITEMS_PER_CATEGORY]
+            log.warning("Nenhuma das %s escolhas passou na validacao", len(escolhas_brutas))
         if attempt < NEWS_SUMMARY_ATTEMPTS - 1:
             # Sem essa pausa as duas tentativas caiam dentro do mesmo soluco da API e
             # falhavam juntas - foi o que aconteceu em producao em 06/08/2026.
             await asyncio.sleep(NEWS_SUMMARY_RETRY_DELAY_SECONDS)
 
     log.warning("Resumo de noticias falhou 2x, mostrando itens sem traducao")
-    return items[:NEWS_ITEMS_PER_CATEGORY]
+    return items[:NEWS_MAX_ITEMS_PER_CATEGORY]
 
 
 def build_item_embed(category: dict, item: dict) -> discord.Embed:
@@ -505,10 +541,33 @@ def build_item_embed(category: dict, item: dict) -> discord.Embed:
     return embed
 
 
-NEWS_INTRO_PROMPT = """Escreva UMA linha curta de abertura, com a sua personalidade (direta, sem
-bajulacao, pode ter humor leve), pra introduzir o resumo diario de noticias que voce vai postar agora.
-Nao inclua data nem as palavras "resumo" ou "noticias" no texto - so a frase de abertura em si. Varie o
-estilo, evite soar generica ou repetitiva. Responda somente com essa linha, sem aspas."""
+# A abertura antiga era escrita ANTES da curadoria: o prompt nao recebia noticia
+# nenhuma, entao so dava pra pedir uma frase generica ("bora ver no que o mundo se meteu
+# hoje"). Era a razao principal do digest soar vazio - a Solenne tem voz em todo canto,
+# menos justamente no que ela entrega todo dia. Agora ela le o que foi selecionado antes
+# de abrir a boca, e aponta o que mais importa.
+NEWS_INTRO_PROMPT = """Voce e Solenne e vai postar agora o resumo do dia no Discord. Estas sao as
+noticias que a sua curadoria ja selecionou:
+
+{manchetes}
+
+Primeiro escolha qual e O destaque do dia entre as noticias acima: a que voce acha mais importante.
+
+Depois escreva a abertura desse resumo com a SUA personalidade: direta, sem bajulacao, humor leve
+quando couber, zero tom de telejornal.
+
+Regras duras da abertura:
+- Fale SOMENTE do destaque que voce escolheu. Voce NAO pode citar nenhum fato que nao esteja na
+  lista acima - nada de trazer assunto de fora, nem de memoria, nem inventado.
+- UM assunto so. NAO faca lista, NAO cite varias manchetes de enfiada, NAO use "de X a Y, passando
+  por Z". Isso soa a locutor, nao a voce.
+- Uma ou duas frases curtas, no maximo 200 caracteres, terminando em ponto final.
+- Comente o assunto de verdade (o que voce achou dele) em vez de anunciar que existe um resumo.
+- Se o destaque for tragedia (morte, violencia, desastre), largue o humor e seja sobria.
+- Nao inclua data, nao use as palavras "resumo" ou "noticias", nao use emoji.
+
+Responda SOMENTE com JSON valido, com os campos NESTA ordem - escolha o destaque ANTES de escrever:
+{{"destaque_i": 0, "eco": "as 5 primeiras palavras do titulo do destaque", "abertura": "..."}}"""
 
 NEWS_INTRO_FALLBACKS = [
     "Vamo que vamo, direto ao ponto.",
@@ -517,27 +576,73 @@ NEWS_INTRO_FALLBACKS = [
     "Bora ver no que o mundo se meteu hoje.",
 ]
 
+NEWS_INTRO_MAX_CHARS = 220
 
-async def build_news_intro(interactive: bool = False) -> str:
+
+def flatten_curated(sections: list[tuple[dict, list[dict], list[discord.Embed]]]) -> list[dict]:
+    """Lista unica com todas as noticias do digest, pra IA escolher o destaque do dia."""
+    return [item for _, curated, _ in sections for item in curated]
+
+
+def titulo_exibido(item: dict) -> str:
+    """O titulo que o card mostra - traduzido quando houve traducao."""
+    return item.get("title_pt") or item["title"]
+
+
+def pick_destaque(payload: dict, todas: list[dict]) -> dict | None:
+    """Resolve qual noticia a IA elegeu como destaque, validando pelo eco.
+
+    Mesma ancora da curadoria e pelo mesmo motivo: indice sozinho ja saiu trocado
+    contra a API real, e destaque errado aponta o leitor pra materia errada.
+    """
+    if not todas:
+        return None
+    escolha = {"i": payload.get("destaque_i"), "eco": payload.get("eco")}
+    return resolve_picked_item(escolha, todas, titulo_de=titulo_exibido)
+
+
+async def build_news_intro(
+    sections: list[tuple[dict, list[dict], list[discord.Embed]]], interactive: bool = False
+) -> tuple[str, dict | None]:
+    """Devolve (abertura na voz dela, noticia de destaque do dia)."""
+    todas = flatten_curated(sections)
+    if not todas:
+        return random.choice(NEWS_INTRO_FALLBACKS), None
+
+    # Mesma ordem de flatten_curated, pra o indice que a IA devolver bater com `todas`.
+    rotulos = [categoria["label"] for categoria, curated, _ in sections for _ in curated]
+    manchetes = "\n".join(
+        f"{i}. [{rotulo}] {titulo_exibido(item)}"
+        for i, (rotulo, item) in enumerate(zip(rotulos, todas))
+    )
+    prompt = NEWS_INTRO_PROMPT.format(manchetes=manchetes)
+
     slot = ai_gate.interactive() if interactive else ai_gate.background()
     async with slot:
         try:
-            intro = await _complete(
-                [{"role": "user", "content": NEWS_INTRO_PROMPT}], max_tokens=120, thinking=THINK_OFF
-            )
+            payload = await complete_json(prompt, max_tokens=600)
         except Exception:
             log.exception("Erro ao gerar introducao das noticias")
-            return random.choice(NEWS_INTRO_FALLBACKS)
-    intro = intro.strip().strip('"')
-    return intro or random.choice(NEWS_INTRO_FALLBACKS)
+            return random.choice(NEWS_INTRO_FALLBACKS), None
+
+    abertura = (payload.get("abertura") or "").strip().strip('"')
+    abertura = truncate_sentences(abertura, NEWS_INTRO_MAX_CHARS) or random.choice(NEWS_INTRO_FALLBACKS)
+    return abertura, pick_destaque(payload, todas)
 
 
-async def build_news_digest(interactive: bool = False) -> tuple[list[tuple[dict, list[discord.Embed]]], list[str]]:
-    """Retorna as secoes prontas e os rotulos das categorias que ficaram de fora.
+async def build_news_digest(interactive: bool = False):
+    """Retorna (secoes, categorias que falharam, categorias sem nada relevante).
+
+    Cada secao e uma tupla (categoria, itens curados, embeds) - os itens vao junto
+    porque a abertura do digest precisa ler o que foi selecionado pra escolher o
+    destaque do dia.
 
     Cada categoria e isolada em try/except de proposito: antes, um erro em uma
     (feed fora do ar, banco travado, timeout da NVIDIA) derrubava a geracao inteira
     e o digest chegava truncado sem explicacao nenhuma.
+
+    Falha e "dia fraco" sao listas separadas de proposito: as duas somem do digest, mas
+    uma e problema e a outra e informacao legitima, e juntar as duas escondia bug.
 
     `interactive` diferencia o /noticias (alguem esperando na frente da tela) do post
     automatico do meio-dia, que cede a vez pra qualquer conversa em andamento.
@@ -545,6 +650,7 @@ async def build_news_digest(interactive: bool = False) -> tuple[list[tuple[dict,
     loop = asyncio.get_event_loop()
     sections = []
     skipped = []
+    sem_relevancia = []
     for key, category in NEWS_CATEGORIES.items():
         try:
             raw_items = await loop.run_in_executor(None, _collect_category_items, category)
@@ -557,21 +663,25 @@ async def build_news_digest(interactive: bool = False) -> tuple[list[tuple[dict,
             # portao e por categoria, uma menção no meio do digest espera no maximo uma
             # categoria, e nao o digest inteiro.
             async with (ai_gate.interactive() if interactive else ai_gate.background()):
-                curated = await _summarize_category(raw_items, interest_hint)
+                curated = await _summarize_category(
+                    raw_items, interest_hint, foco=category.get("foco", "")
+                )
         except Exception:
             log.exception("Erro ao montar a categoria %s", category["label"])
             skipped.append(category["label"])
             continue
 
-        embeds = [build_item_embed(category, item) for item in curated]
-        if not embeds:
-            log.warning("Categoria %s ficou sem nenhum item.", category["label"])
-            skipped.append(category["label"])
+        if not curated:
+            # Nao e erro: a curadoria olhou os candidatos e nao achou nada que merecesse
+            # o card. Antes isso era impossivel (a cota fixa sempre preenchia).
+            log.info("Categoria %s sem nada relevante hoje.", category["label"])
+            sem_relevancia.append(category["label"])
             continue
 
-        sections.append((category, embeds))
+        embeds = [build_item_embed(category, item) for item in curated]
+        sections.append((category, curated, embeds))
         await loop.run_in_executor(None, mark_news_posted, [it["link"] for it in curated])
-    return sections, skipped
+    return sections, skipped, sem_relevancia
 
 
 def find_news_channel(guild: discord.Guild) -> discord.TextChannel | None:
@@ -587,7 +697,7 @@ async def post_news_digest(channel: discord.TextChannel, interactive: bool = Fal
             "📰 Buscando e resumindo as noticias do dia...", eta_seconds=NEWS_THINKING_ETA_SECONDS
         )
     )
-    sections, skipped = await build_news_digest(interactive=interactive)
+    sections, skipped, sem_relevancia = await build_news_digest(interactive=interactive)
     if not sections:
         await placeholder.edit(
             content="Nao encontrei noticias relevantes nas ultimas horas, tento de novo mais tarde.",
@@ -595,15 +705,21 @@ async def post_news_digest(channel: discord.TextChannel, interactive: bool = Fal
         )
         return
     today = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
-    intro = await build_news_intro(interactive=interactive)
-    
+    intro, destaque = await build_news_intro(sections, interactive=interactive)
+
     header_embed = discord.Embed(description=f"**{intro}**", color=discord.Color.purple())
     header_embed.set_author(name=f"Resumo de Notícias — {today}", icon_url=channel.guild.me.display_avatar.url)
-    
+    if destaque:
+        header_embed.add_field(
+            name="📌 Destaque do dia",
+            value=f"[{truncate_words(titulo_exibido(destaque), NEWS_TITLE_MAX_CHARS)}]({destaque['link']})",
+            inline=False,
+        )
+
     await placeholder.edit(
         content=None, embed=header_embed
     )
-    for category, embeds in sections:
+    for category, _curated, embeds in sections:
         await channel.send(f"# {category['label']}")
         try:
             await channel.send(embeds=embeds, view=FeedbackView(category["label"]))
@@ -612,9 +728,12 @@ async def post_news_digest(channel: discord.TextChannel, interactive: bool = Fal
             await channel.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
 
     # Diz o que faltou em vez de simplesmente omitir - categoria sumindo em silencio
-    # e indistinguivel de "nao teve noticia hoje" pra quem esta lendo.
+    # e indistinguivel de "nao teve noticia hoje" pra quem esta lendo. Dia fraco e falha
+    # aparecem separados: um e curadoria funcionando, o outro e coisa pra investigar.
+    if sem_relevancia:
+        await channel.send(f"-# Nada que valesse a pena em: {', '.join(sem_relevancia)}.")
     if skipped:
-        await channel.send(f"-# Sem novidade em: {', '.join(skipped)}.")
+        await channel.send(f"-# Deu erro em: {', '.join(skipped)}.")
 
 
 class NewsCog(commands.Cog):
