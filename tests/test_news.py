@@ -4,7 +4,9 @@ from cogs.news import (
     _summarize_anilist_entries,
     build_curated_items,
     dedup_same_story,
+    flatten_curated,
     interleave_by_source,
+    pick_destaque,
     resolve_picked_item,
     same_story,
 )
@@ -163,6 +165,64 @@ def test_build_curated_items_rejeita_payload_sem_lista():
     except ValueError:
         return
     raise AssertionError("payload sem 'noticias' deveria levantar ValueError")
+
+
+def _curado(titulo_pt, link, titulo_original="Original headline here"):
+    item = _news(titulo_original, link)
+    item["title_pt"] = titulo_pt
+    item["summary_pt"] = "resumo traduzido com tamanho suficiente."
+    return item
+
+
+def _secao(label, itens):
+    return ({"label": label, "color": None}, itens, [])
+
+
+def test_flatten_curated_mantem_a_ordem_do_digest():
+    """O indice que a IA devolve pro destaque e posicao nessa lista achatada - se a
+    ordem divergir da que foi mostrada pra ela, o destaque aponta pro card errado."""
+    secoes = [
+        _secao("🌍 Mundo", [_curado("Primeira", "a"), _curado("Segunda", "b")]),
+        _secao("💻 Tech", [_curado("Terceira", "c")]),
+    ]
+    assert [it["title_pt"] for it in flatten_curated(secoes)] == ["Primeira", "Segunda", "Terceira"]
+
+
+def test_flatten_curated_com_digest_vazio():
+    assert flatten_curated([]) == []
+
+
+def test_pick_destaque_casa_pelo_titulo_traduzido():
+    """Na curadoria a IA le titulos originais em ingles; na escolha do destaque ela ja
+    le os traduzidos. Comparar o eco contra o titulo errado faria todo eco falhar."""
+    todas = [
+        _curado("Israel e Hamas estendem cessar-fogo por 48h", "a"),
+        _curado("Inundacoes deslocam 200 mil no Paquistao", "b"),
+    ]
+    payload = {"destaque_i": 1, "eco": "Inundacoes deslocam 200 mil no"}
+    assert pick_destaque(payload, todas)["link"] == "b"
+
+
+def test_pick_destaque_corrige_indice_trocado():
+    todas = [_curado("Israel e Hamas estendem cessar-fogo", "a"), _curado("Inundacoes no Paquistao", "b")]
+    payload = {"destaque_i": 0, "eco": "Inundacoes no Paquistao"}
+    assert pick_destaque(payload, todas)["link"] == "b"
+
+
+def test_pick_destaque_sem_noticia_nenhuma():
+    assert pick_destaque({"destaque_i": 0, "eco": "qualquer"}, []) is None
+
+
+def test_pick_destaque_descarta_escolha_que_nao_casa():
+    """Melhor digest sem destaque do que destaque apontando pra materia errada."""
+    todas = [_curado("Israel e Hamas estendem cessar-fogo", "a")]
+    assert pick_destaque({"destaque_i": 7, "eco": "Assunto totalmente diferente disso"}, todas) is None
+
+
+def test_build_curated_items_aceita_lista_vazia_de_proposito():
+    """Dia fraco: a curadoria pode dizer "nao teve nada relevante". Isso e resposta
+    valida, nao falha - antes a cota fixa de 3 tornava isso impossivel."""
+    assert build_curated_items({"noticias": []}, [_news(HELICOPTERO_A)]) == []
 
 
 def test_summarize_anilist_entries_empty():
