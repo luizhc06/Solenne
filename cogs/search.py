@@ -1,5 +1,6 @@
 import asyncio
 import re
+import json
 import html
 import logging
 import urllib.parse
@@ -9,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from db import save_message
+import tools
 from ai_client import _complete, THINK_LOW
 from utils import thinking_embed
 from views import FeedbackView
@@ -98,35 +99,6 @@ def build_search_embed(results: list[dict]) -> discord.Embed:
 # (pesquise, pesquisa, pesquisar) de proposito, pra nao disparar em palavras do
 # dia a dia tipo "buscar"/"procurar" e evitar estourar contexto/armazenamento
 # com buscas nao intencionais.
-SEARCH_TRIGGER_RE = re.compile(r"\bpesquis\w*\b", re.IGNORECASE)
-
-
-def wants_web_search(content: str) -> bool:
-    return bool(SEARCH_TRIGGER_RE.search(content))
-
-
-async def auto_search_reply(
-    query: str, author_name: str, author_id: int, channel_id: int
-) -> tuple[str | None, discord.Embed | None]:
-    loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(None, _web_search_sync, query)
-    if len(results) < SEARCH_MIN_SOURCES:
-        return (
-            f"So encontrei {len(results)} fonte(s) confiavel(is) pra isso, menos do que o "
-            "minimo de 5. Tenta reformular.",
-            None,
-        )
-    answer = await _synthesize_search(query, results)
-    embed = build_search_embed(results)
-    # Guarda so a pergunta e um resumo curto na memoria, nao os resultados brutos da
-    # busca - evita inchar o banco e o contexto de conversas futuras nesse canal.
-    await loop.run_in_executor(None, save_message, channel_id, "user", author_name, query)
-    await loop.run_in_executor(None, save_message, channel_id, "assistant", None, answer[:500])
-    # Content de mensagem do Discord tem limite de 2000 chars (diferente do embed,
-    # que aguentava ate 4096) - trunca aqui pra nao estourar HTTPException no caller.
-    return (answer[:2000], embed)
-
-
 class SearchCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -165,3 +137,51 @@ class SearchCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SearchCog(bot))
+
+
+PESQUISAR_WEB_DESCRICAO = (
+    "Busca informacao ATUAL na web e devolve trechos com as fontes. Use quando a "
+    "resposta depende de fato recente, preco, lancamento, resultado, noticia ou "
+    "qualquer coisa que mude com o tempo, e tambem quando voce simplesmente nao tem "
+    "certeza. NAO use para conhecimento estavel (conceito, definicao, historia, como "
+    "algo funciona) nem para conversa pessoal."
+)
+
+
+@tools.register(
+    name="pesquisar_web",
+    description=PESQUISAR_WEB_DESCRICAO,
+    parameters={
+        "type": "object",
+        "properties": {
+            "consulta": {
+                "type": "string",
+                "description": "O termo de busca, em linguagem natural e sem girias.",
+            }
+        },
+        "required": ["consulta"],
+    },
+)
+async def tool_pesquisar_web(consulta: str) -> tools.ToolResult:
+    """Devolve os resultados BRUTOS pro modelo sintetizar.
+
+    De proposito nao usa _synthesize_search: quando o proprio modelo ja vai escrever a
+    resposta com esses dados em maos, sintetizar antes seria uma chamada de IA a mais
+    pra produzir um texto que ele reescreveria em seguida.
+    """
+    loop = asyncio.get_event_loop()
+    resultados = await loop.run_in_executor(None, _web_search_sync, consulta)
+    if not resultados:
+        return tools.ToolResult(json.dumps({"erro": "nenhuma fonte encontrada"}, ensure_ascii=False))
+
+    payload = {
+        "fontes": [
+            {"n": i + 1, "titulo": r["title"], "trecho": r["snippet"][:400], "url": r["url"]}
+            for i, r in enumerate(resultados)
+        ]
+    }
+    # O embed de fontes continua indo pro Discord: a sintese agora e do modelo, mas
+    # quem le precisa poder conferir de onde saiu cada coisa.
+    return tools.ToolResult(
+        json.dumps(payload, ensure_ascii=False), embed=build_search_embed(resultados)
+    )

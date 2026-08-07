@@ -4,6 +4,8 @@ import asyncio
 import logging
 import contextlib
 
+import tools
+
 from openai import (
     AsyncOpenAI,
     APIConnectionError,
@@ -215,16 +217,25 @@ def clean_reply(text: str) -> str:
     return text.strip()
 
 
-async def _complete(
+async def _request(
     messages: list[dict],
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = 800,
     thinking: str = THINK_OFF,
     json_mode: bool = False,
-) -> str:
+    tools: list[dict] | None = None,
+):
+    """Uma chamada ao modelo, com retry, devolvendo a mensagem crua.
+
+    Separada de `_complete` porque com ferramentas o normal e content VAZIO e
+    tool_calls preenchido - a validacao de "veio vazio" so vale pra quem esperava texto.
+    """
     extra_kwargs = {}
     if json_mode:
         extra_kwargs["response_format"] = {"type": "json_object"}
+    if tools:
+        extra_kwargs["tools"] = tools
+        extra_kwargs["tool_choice"] = "auto"
 
     last_error: Exception | None = None
     for attempt in range(AI_MAX_ATTEMPTS):
@@ -238,17 +249,7 @@ async def _complete(
                 extra_body=thinking_kwargs(thinking),
                 **extra_kwargs,
             )
-            choice = completion.choices[0]
-            # A API as vezes retorna content=None (sem levantar erro) em vez de string vazia.
-            content = clean_reply(choice.message.content or "")
-            if not content:
-                # Com raciocinio ligado isso quase sempre e max_tokens curto demais: o
-                # trace consumiu o orcamento inteiro e sobrou zero pra resposta.
-                raise EmptyAIResponse(
-                    f"resposta vazia (finish_reason={choice.finish_reason}, "
-                    f"max_tokens={max_tokens}, thinking={thinking})"
-                )
-            return content
+            return completion.choices[0]
         except Exception as exc:
             if not is_transient_ai_error(exc):
                 raise
@@ -267,6 +268,30 @@ async def _complete(
                 await asyncio.sleep(delay)
 
     raise last_error
+
+
+async def _complete(
+    messages: list[dict],
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_tokens: int = 800,
+    thinking: str = THINK_OFF,
+    json_mode: bool = False,
+) -> str:
+    """Uma chamada que TEM que voltar com texto."""
+    choice = await _request(
+        messages, temperature=temperature, max_tokens=max_tokens,
+        thinking=thinking, json_mode=json_mode,
+    )
+    # A API as vezes retorna content=None (sem levantar erro) em vez de string vazia.
+    content = clean_reply(choice.message.content or "")
+    if not content:
+        # Com raciocinio ligado isso quase sempre e max_tokens curto demais: o
+        # trace consumiu o orcamento inteiro e sobrou zero pra resposta.
+        raise EmptyAIResponse(
+            f"resposta vazia (finish_reason={choice.finish_reason}, "
+            f"max_tokens={max_tokens}, thinking={thinking})"
+        )
+    return content
 
 
 async def complete_json(
@@ -306,6 +331,67 @@ def parse_json_payload(raw: str) -> dict:
     if inicio == -1 or fim <= inicio:
         raise ValueError("resposta sem nenhum objeto JSON reconhecivel")
     return json.loads(text[inicio:fim + 1])
+
+
+# Quantas vezes ela pode chamar ferramenta antes de ser obrigada a responder. 2 cobre
+# "pesquisa e responde" e "pesquisa, ficou faltando algo, pesquisa de novo"; mais que
+# isso vira espera longa demais pra quem esta olhando o "Pensando...".
+MAX_TOOL_ROUNDS = 2
+
+
+async def answer_with_tools(base_messages: list[dict]) -> tuple[str, list]:
+    """Deixa a Solenne escolher ferramenta antes de responder.
+
+    Modos de raciocinio medidos contra a API de producao, com resultado bem diferente:
+
+    - 1a chamada (decidir + responder): ORCAMENTO. E dela que sai tanto a decisao quanto
+      a resposta profunda quando nao ha ferramenta a usar - rebaixar aqui desfaz a
+      correcao que tirou a Solenne de "bobinha". Com raciocinio desligado ela chamou
+      busca web pra "diferenca entre TCP e UDP", conhecimento estavel que nao precisa.
+    - 2a chamada (sintetizar o que a ferramenta trouxe): LOW_EFFORT. E so juntar dado
+      que ja chegou, e foi exatamente onde o orcamento estourou e devolveu resposta
+      vazia numa das sondas.
+
+    Nessa combinacao: 10/10 decisoes corretas e nenhuma resposta vazia.
+    """
+    especificacoes = tools.tool_specs()
+    if not especificacoes:
+        return await _think_and_answer(base_messages), []
+
+    mensagens = list(base_messages)
+    embeds = []
+    for rodada in range(MAX_TOOL_ROUNDS):
+        primeira = rodada == 0
+        choice = await _request(
+            mensagens,
+            max_tokens=REASONING_BUDGET + 1600 if primeira else 1600,
+            thinking=THINK_BUDGET if primeira else THINK_LOW,
+            tools=especificacoes,
+        )
+        chamadas = choice.message.tool_calls or []
+        if not chamadas:
+            texto = clean_reply(choice.message.content or "")
+            if texto:
+                return texto, embeds
+            break
+
+        log.info("Solenne pediu: %s", [c.function.name for c in chamadas])
+        mensagens.append(choice.message.model_dump(exclude_none=True))
+        for chamada in chamadas:
+            resultado = await tools.execute_tool(chamada.function.name, chamada.function.arguments)
+            if resultado.embed is not None:
+                embeds.append(resultado.embed)
+            mensagens.append({
+                "role": "tool",
+                "tool_call_id": chamada.id,
+                "content": resultado.content,
+            })
+
+    # Estourou as rodadas (ou veio vazio): fecha SEM ferramentas, pra ela ser obrigada a
+    # responder com o que ja tem em vez de pedir mais uma busca pra sempre.
+    log.info("Fechando a resposta sem ferramentas apos %s rodada(s)", MAX_TOOL_ROUNDS)
+    texto = await _complete(mensagens, max_tokens=1600, thinking=THINK_LOW)
+    return texto, embeds
 
 
 async def _think_and_answer(base_messages: list[dict]) -> str:

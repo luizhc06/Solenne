@@ -1,6 +1,7 @@
 import re
 import html
 import socket
+import json
 import asyncio
 import logging
 import ipaddress
@@ -11,6 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import tools
 from ai_client import ai_gate, _complete, THINK_LOW
 from utils import thinking_embed
 from views import FeedbackView
@@ -159,3 +161,40 @@ class LinkSummaryCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LinkSummaryCog(bot))
+
+
+@tools.register(
+    name="resumir_link",
+    description=(
+        "Abre uma pagina da web e devolve o texto real dela. Use quando alguem mandar um "
+        "link e quiser saber o que tem nele, ou quando precisar do conteudo de uma URL "
+        "especifica que ja apareceu na conversa. Nao serve pra buscar - so pra abrir um "
+        "endereco que voce ja tem."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "URL completa, comecando com http:// ou https://"}
+        },
+        "required": ["url"],
+    },
+)
+async def tool_resumir_link(url: str) -> tools.ToolResult:
+    loop = asyncio.get_event_loop()
+    try:
+        # Mesma validacao anti-SSRF do /resumolink: sem isso a Solenne viraria um jeito
+        # de fazer o servidor buscar endereco interno so pedindo por chat.
+        ensure_public_http_url(url)
+        titulo, texto = await loop.run_in_executor(None, _fetch_page_sync, url)
+    except UnsafeURLError as exc:
+        return tools.ToolResult(json.dumps({"erro": str(exc)}, ensure_ascii=False))
+    except Exception as exc:
+        return tools.ToolResult(json.dumps({"erro": f"nao consegui abrir: {exc}"}, ensure_ascii=False))
+
+    if len(texto) < 200:
+        return tools.ToolResult(
+            json.dumps({"erro": "pagina sem texto suficiente (talvez carregue por JavaScript)"}, ensure_ascii=False)
+        )
+    return tools.ToolResult(
+        json.dumps({"titulo": titulo, "url": url, "texto": texto[:MAX_TEXT_CHARS]}, ensure_ascii=False)
+    )

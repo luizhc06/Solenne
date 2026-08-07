@@ -9,7 +9,7 @@ from discord.ext import commands
 
 from config import OWNER_USER_ID, NEWS_TIMEZONE, DIAS_SEMANA
 from db import load_recent_history, save_message, get_user_summary, load_user_messages
-from ai_client import ai_gate, _think_and_answer, _complete, friendly_ai_error, THINK_LOW
+from ai_client import ai_gate, answer_with_tools, _complete, friendly_ai_error, THINK_LOW
 from user_profile import update_profile
 from notify import notify_owner_text
 from utils import (
@@ -21,7 +21,6 @@ from utils import (
     AMBIENT_COOLDOWN_SECONDS,
 )
 from views import FeedbackView
-from cogs.search import wants_web_search, auto_search_reply
 
 log = logging.getLogger("hermes-bot")
 
@@ -70,6 +69,19 @@ Tom e formato (regras duras):
   demais, e sem ceder na informacao (ex: continuar dizendo que a pessoa nao e o dono, so que
   de um jeito engracado em vez de seco).
 
+FERRAMENTAS QUE VOCE USA SOZINHA (nao precisa que ninguem peca comando):
+- `pesquisar_web` - busca na web. Use quando a resposta depende de fato recente, preco, lancamento,
+  resultado, noticia, ou quando voce simplesmente nao tem certeza. Nao use pra conhecimento estavel
+  (conceito, definicao, como algo funciona) nem pra conversa pessoal - nesses casos responda direto.
+- `consultar_clima` - clima, previsao e alerta oficial do INMET. Use SEMPRE que perguntarem sobre
+  tempo, chuva, temperatura, frio ou calor. Nunca responda clima de cabeca.
+- `resumir_link` - abre uma URL que ja apareceu na conversa e le o conteudo real dela.
+
+Ao usar ferramenta: nao anuncie que vai usar, nao narre o processo, nao cite o nome da ferramenta.
+So responda com o resultado, como se voce ja soubesse. Se a ferramenta devolver erro, diga
+francamente que nao conseguiu conferir e responda com o que voce tem - nunca preencha o buraco com
+dado inventado.
+
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
 - Comandos que voce realmente tem: /help, /ask, /resumo, /pesquisa, /resumolink, /noticias,
   /clima, /status, /lembrete, /lembretes, /cancelarlembrete, /anime, /kick, /addrole,
@@ -88,15 +100,16 @@ IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
 - Voce NAO tem: busca na Wikipedia, calculadora, nem qualquer outro comando que nao esteja
   na lista acima.
 - Se alguem perguntar sobre seus comandos, liste APENAS os reais (ou sugira usar /help).
-- Se alguem pedir algo que voce nao sabe fazer de verdade (calculadora, busca na Wikipedia,
-  etc. - fora da lista de comandos acima), diga claramente que ainda nao tem essa
-  funcionalidade. Para clima, sempre sugira usar /clima em vez de responder de cabeca.
+- Se alguem pedir algo que voce nao sabe fazer de verdade (calculadora, fora da lista de
+  comandos e das ferramentas acima), diga claramente que ainda nao tem essa funcionalidade.
   Nunca finja ter uma capacidade que nao existe nem responda com informacao inventada se
-  passando por dado real (tipo previsao do tempo "generica").
+  passando por dado real (tipo previsao do tempo "generica" - pra isso voce tem ferramenta).
 """
 
 
-async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id: int) -> str:
+async def ask_hermes(
+    channel_id: int, user_msg: str, author_name: str, author_id: int
+) -> tuple[str, list]:
     async with ai_gate.interactive():
         loop = asyncio.get_event_loop()
 
@@ -117,7 +130,7 @@ async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id
             f"nunca invente ou chute uma data. Seu conhecimento de treino e mais antigo que "
             f"essa data, entao NUNCA diga que um produto, evento ou lancamento 'nao existe' "
             f"so porque voce nao conhece - diga que nao tem informacao sobre ele e, se for o "
-            f"caso, sugira /pesquisa."
+            f"caso, use a ferramenta de busca pra conferir."
             + f"\n\nO ID Discord do seu dono/criador (Rizu) e {OWNER_USER_ID}. A mensagem atual "
             + ("VEIO do dono de verdade (o ID bate)." if eh_dono else "NAO veio do dono (o ID nao bate com o do dono).")
             + " Use isso pra responder com certeza sobre quem e o dono, em vez de dizer que "
@@ -133,14 +146,14 @@ async def ask_hermes(channel_id: int, user_msg: str, author_name: str, author_id
             + [{"role": "user", "content": pergunta_atual}]
         )
 
-        reply = await _think_and_answer(base_messages)
+        reply, embeds = await answer_with_tools(base_messages)
 
         await loop.run_in_executor(None, save_message, channel_id, "user", author_name, user_msg)
         await loop.run_in_executor(None, save_message, channel_id, "assistant", None, reply)
 
         asyncio.create_task(update_profile(author_id, author_name, user_msg))
 
-        return reply
+        return reply, embeds
 
 
 SUMMARY_PROMPT = """Voce e Solenne, IA pessoal do Rizu.
@@ -225,25 +238,12 @@ class ChatCog(commands.Cog):
         if not direct:
             self.ambient_last_reply[message.channel.id] = time.monotonic()
 
-        if wants_web_search(content):
-            placeholder = await _send_placeholder(
-                message, thinking_embed(f'🔎 Pesquisando sobre "{content[:100]}"...', eta_seconds=20)
-            )
-            try:
-                text, embed = await auto_search_reply(
-                    content, message.author.display_name, message.author.id, message.channel.id
-                )
-            except Exception:
-                log.exception("Erro na busca automatica")
-                text, embed = "Deu ruim pesquisando isso, tenta de novo em instantes.", None
-            await placeholder.edit(content=text, embed=embed, view=FeedbackView(content[:200]))
-            return
-
         # Responde em thread na mensagem original: num canal movimentado a resposta
         # solta se perde no meio da conversa e da a impressao de que ela nao respondeu.
         placeholder = await _send_placeholder(message, thinking_embed())
+        embeds = []
         try:
-            reply = await ask_hermes(
+            reply, embeds = await ask_hermes(
                 message.channel.id, content, message.author.display_name, message.author.id
             )
         except Exception as exc:
@@ -258,29 +258,38 @@ class ChatCog(commands.Cog):
         partes = split_discord_message(reply) or [
             "Fiquei sem palavras aqui (resposta veio vazia). Pergunta de novo?"
         ]
-        await placeholder.edit(content=partes[0], embed=None, view=FeedbackView(content[:200]))
-        for parte in partes[1:]:
-            await message.channel.send(parte)
+        # O embed de fontes so faz sentido junto do ultimo pedaco, onde a resposta fecha.
+        await placeholder.edit(
+            content=partes[0],
+            embeds=embeds if len(partes) == 1 else [],
+            view=FeedbackView(content[:200]),
+        )
+        for i, parte in enumerate(partes[1:], start=1):
+            ultimo = i == len(partes) - 1
+            await message.channel.send(parte, embeds=embeds if ultimo else [])
 
     @app_commands.command(name="ask", description="Pergunte algo a Solenne")
     @app_commands.describe(pergunta="O que voce quer perguntar")
     async def ask(self, interaction: discord.Interaction, pergunta: str):
         await interaction.response.send_message(embed=thinking_embed())
         try:
-            reply = await ask_hermes(
+            reply, embeds = await ask_hermes(
                 interaction.channel_id, pergunta, interaction.user.display_name, interaction.user.id
             )
         except Exception as exc:
             log.exception("Erro ao consultar Solenne")
-            reply = friendly_ai_error(exc)
+            reply, embeds = friendly_ai_error(exc), []
         partes = split_discord_message(reply) or [
             "Fiquei sem palavras aqui (resposta veio vazia). Pergunta de novo?"
         ]
         await interaction.edit_original_response(
-            content=partes[0], embed=None, view=FeedbackView(pergunta[:200])
+            content=partes[0],
+            embeds=embeds if len(partes) == 1 else [],
+            view=FeedbackView(pergunta[:200]),
         )
-        for parte in partes[1:]:
-            await interaction.followup.send(parte)
+        for i, parte in enumerate(partes[1:], start=1):
+            ultimo = i == len(partes) - 1
+            await interaction.followup.send(parte, embeds=embeds if ultimo else [])
 
     @app_commands.command(name="resumo", description="Resume o que rolou de conversa recente no canal")
     @app_commands.describe(mensagens="Quantas mensagens analisar (10-100, padrao 50)")

@@ -52,6 +52,19 @@ compartilhada em modulos de nivel superior:
   rebaixava um modelo de raciocinio a um modelo de 12B respondendo de primeira, e ainda
   custava ~66s por resposta contra ~20-45s hoje. As passadas antigas continuam disponiveis
   por env (`REFINEMENT_ROUNDS`, `HUMANIZE_PASS`), desligadas por padrao.
+- **Ferramentas que ela usa sozinha** (`tools.py`): `pesquisar_web`, `consultar_clima` e
+  `resumir_link`. A Solenne DECIDE quando usar, via function calling do proprio modelo —
+  antes existia so um regex procurando a palavra "pesquisa" na mensagem, entao ela sabia
+  consultar clima mas nunca consultava sozinha quando alguem perguntava se ia chover.
+  Os cogs se registram no `tools.py` ao serem carregados; `ai_client` so le o registro
+  (o modulo separado existe pra quebrar o ciclo cog -> ai_client -> cog).
+  **Os modos de raciocinio das duas chamadas sao diferentes de proposito**: orcamento na
+  1a (e dela que sai a decisao E a resposta profunda quando nao ha ferramenta a usar — com
+  raciocinio desligado ela chamou busca web pra "diferenca entre TCP e UDP") e `low_effort`
+  na 2a (so sintetizar o que a ferramenta trouxe — foi onde o orcamento estourou e devolveu
+  resposta vazia numa sonda). Medido: 10/10 decisoes corretas, nenhuma resposta vazia.
+  **Custo**: com ferramentas ligadas a resposta ficou em 38-60s (era 20-45s) — as specs e a
+  secao de ferramentas no prompt entram em toda mensagem. `AI_REASONING_BUDGET` e o dial.
 - **Como falar com ela**: mencionando (`@Solenne`), **respondendo (reply) uma mensagem
   dela** ou **chamando pelo nome** no meio da frase (`solenne, o que voce acha?`). Os dois
   ultimos nao existiam e eram justamente os gestos mais naturais — sem eles a Solenne
