@@ -1,3 +1,4 @@
+import json
 import asyncio
 import logging
 import unicodedata
@@ -9,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import DIAS_SEMANA
+import tools
 from utils import TTLCache
 
 log = logging.getLogger("hermes-bot")
@@ -241,3 +243,61 @@ class WeatherCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(WeatherCog(bot))
+
+
+@tools.register(
+    name="consultar_clima",
+    description=(
+        "Clima atual, sensacao termica e previsao dos proximos dias de uma cidade, mais "
+        "alertas oficiais do INMET quando a cidade e brasileira. Use SEMPRE que "
+        "perguntarem sobre tempo, clima, chuva, temperatura, frio ou calor - nunca "
+        "responda isso de cabeca."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "cidade": {"type": "string", "description": "Nome da cidade, ex: 'Curitiba'"}
+        },
+        "required": ["cidade"],
+    },
+)
+async def tool_consultar_clima(cidade: str) -> tools.ToolResult:
+    loop = asyncio.get_event_loop()
+    location = await loop.run_in_executor(None, _geocode_city_sync, cidade)
+    if location is None:
+        return tools.ToolResult(json.dumps({"erro": f"cidade '{cidade}' nao encontrada"}, ensure_ascii=False))
+
+    forecast = await loop.run_in_executor(None, _fetch_forecast_sync, location["lat"], location["lon"])
+    if forecast is None:
+        return tools.ToolResult(json.dumps({"erro": "previsao indisponivel agora"}, ensure_ascii=False))
+
+    atual = forecast.get("current", {})
+    _emoji, descricao = _weather_desc(atual.get("weather_code"))
+    payload = {
+        "cidade": location["name"],
+        "estado": location.get("state"),
+        "pais": location.get("country"),
+        "temperatura_c": atual.get("temperature_2m"),
+        "sensacao_c": atual.get("apparent_temperature"),
+        "umidade_pct": atual.get("relative_humidity_2m"),
+        "condicao": descricao,
+    }
+
+    # Alerta oficial e a parte que ela NAO pode inventar nem omitir - vai junto sempre
+    # que existir, pra resposta de conversa ficar tao completa quanto a do /clima.
+    if location.get("country") == "Brasil":
+        uf = _state_to_uf(location.get("state") or "")
+        if uf:
+            alertas = await loop.run_in_executor(None, _fetch_inmet_alerts_sync, location["name"], uf)
+            if alertas:
+                payload["alertas_inmet"] = [
+                    {
+                        "descricao": a.get("descricao"),
+                        "severidade": a.get("severidade"),
+                        "inicio": a.get("inicio"),
+                        "fim": a.get("fim"),
+                    }
+                    for a in alertas[:3]
+                ]
+
+    return tools.ToolResult(json.dumps(payload, ensure_ascii=False))
