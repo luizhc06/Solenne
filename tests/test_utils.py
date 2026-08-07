@@ -2,6 +2,7 @@ from utils import (
     looks_like_question,
     mentions_solenne,
     split_discord_message,
+    truncate_sentences,
     truncate_words,
     TTLCache,
 )
@@ -44,6 +45,27 @@ def test_truncate_words_nao_corta_no_meio_da_palavra():
     assert len(cortado) <= 40
     assert cortado.endswith("…")
     assert cortado[:-1].strip() in texto
+
+
+def test_truncate_sentences_corta_no_fim_da_frase():
+    """A abertura do digest saiu cortada em "Tudo ao…" no teste contra o modelo real -
+    reticencias no meio de uma fala dela fica so quebrado, diferente de um titulo."""
+    texto = "A Amazon pediu pra reduzir uso de EC2. Isso diz muito sobre o custo da IA. E tem mais coisa."
+    cortado = truncate_sentences(texto, 70)
+    assert cortado == "A Amazon pediu pra reduzir uso de EC2. Isso diz muito sobre o custo da IA."[:len(cortado)]
+    assert cortado.endswith(".")
+    assert "…" not in cortado
+
+
+def test_truncate_sentences_deixa_texto_curto_intacto():
+    assert truncate_sentences("Uma frase curta.", 200) == "Uma frase curta."
+
+
+def test_truncate_sentences_cai_pro_corte_por_palavra_sem_pontuacao():
+    """Se nem a primeira frase couber, melhor reticencias do que devolver vazio."""
+    cortado = truncate_sentences("palavra " * 40, 50)
+    assert len(cortado) <= 50
+    assert cortado.endswith("…")
 
 
 def test_truncate_words_deixa_texto_curto_intacto():

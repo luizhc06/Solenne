@@ -136,7 +136,15 @@ compartilhada em modulos de nivel superior:
   timeout, e um feed lento pendurava a thread e travava o digest todo.
 - Categoria que falha ou fica vazia e reportada no fim do post em vez de sumir calada,
   e um erro numa categoria nao derruba mais as outras.
-- **Curadoria em JSON estrito** (`response_format=json_object`, raciocinio desligado): 3
+- **Abertura com a voz dela + destaque do dia**: a intro so e escrita DEPOIS da curadoria e
+  recebe as manchetes selecionadas, entao ela comenta o assunto mais forte do dia em vez de
+  soltar uma frase generica. Antes o prompt da intro nao recebia noticia nenhuma — era a
+  razao principal do digest soar vazio.
+  **A ordem dos campos do JSON importa e e proposital** (`destaque_i`, `eco`, `abertura`):
+  com `abertura` primeiro, o modelo escrevia antes de ter escolhido o destaque e chegou a
+  INVENTAR noticia que nao estava na lista. Geracao e autoregressiva — a ordem dos campos e
+  a ordem em que ele pensa. Depois da inversao: 6/6 aberturas ancoradas em manchetes reais.
+- **Curadoria em JSON estrito** (`response_format=json_object`, raciocinio desligado): ate 4
   cards por categoria, titulo de ate 90 caracteres so com o fato principal e resumo de uma
   frase, ambos em PT-BR a partir do texto real do feed, com link da fonte sempre presente.
   O formato anterior era uma linha de texto `INDICE ||| titulo ||| resumo` — o modelo
@@ -147,6 +155,12 @@ compartilhada em modulos de nivel superior:
   recuperado pelo eco em vez de aceito — sem isso um indice trocado gera o pior erro
   possivel aqui: card com o titulo de uma noticia e o LINK e a imagem de outra, parecendo
   perfeitamente correto. Reproduzido contra a API real antes da ancora existir.
+- **Quantidade variavel por categoria** (0 a 4, nao cota fixa): dia fraco vira "nada que
+  valesse a pena em X" em vez de tres manchetes mornas de enchimento. Falha e dia fraco sao
+  reportados em linhas separadas — uma e curadoria funcionando, a outra e coisa pra investigar.
+- **Cada categoria declara seu `foco`** e o prompt manda descartar o que nao encaixa. Sem
+  isso, "Trump diz que Congresso dos EUA quer regulamentar a IA" entrava na categoria Brasil
+  so porque saiu num veiculo brasileiro.
 - **Raciocinio fica DESLIGADO na curadoria de proposito**: medido em producao, com
   `low_effort` ligado o modelo devolve JSON valido mas deixa os resumos em ingles; com
   raciocinio desligado, traduz certo.

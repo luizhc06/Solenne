@@ -63,6 +63,23 @@ def truncate_words(text: str, limit: int) -> str:
     return corte.rstrip(" ,;:.-") + "…"
 
 
+def truncate_sentences(text: str, limit: int) -> str:
+    """Corta no fim da ultima frase que couber, em vez de no meio de uma.
+
+    Titulo de card pode terminar com reticencias sem incomodar; uma fala da Solenne
+    cortada em "Tudo ao…" fica so quebrada. Se nem a primeira frase couber, cai pro
+    corte por palavra.
+    """
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+
+    fim = max(text.rfind(sinal, 0, limit + 1) for sinal in (". ", "! ", "? ", ".", "!", "?"))
+    if fim > 0:
+        return text[:fim + 1].strip()
+    return truncate_words(text, limit)
+
+
 def split_discord_message(text: str, limit: int = 1900) -> list[str]:
     """Fatia uma resposta longa respeitando quebras de linha e espacos.
 
