@@ -1,7 +1,8 @@
+import re
 import time
 import logging
 from datetime import timedelta, datetime, timezone
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 
 import discord
 from discord.ext import commands
@@ -13,8 +14,74 @@ log = logging.getLogger("hermes-bot")
 FLOOD_WINDOW_SECONDS = 5
 FLOOD_MAX_MESSAGES = 5
 FLOOD_MAX_DUPLICATES = 3
-FLOOD_MAX_MENTIONS = 5
 TIMEOUT_SECONDS = 60
+
+# ---------------------------------------------------------------------------------
+# Mencoes
+#
+# A regra antiga era "5 ou mais mencoes numa mensagem = spam", e apagava na hora, com
+# timeout e DM pro dono com botao de banir. Marcar 5 amigos DIFERENTES numa mensagem e
+# conversa normal, e foi exatamente isso que aconteceu em producao (ago/2026): mensagem
+# legitima apagada, sem aviso nenhum.
+#
+# O que incomoda de verdade nao e mencionar MUITA gente, e mencionar a MESMA pessoa
+# repetidamente. Entao a contagem agora e por alvo, com aviso antes da punicao.
+# ---------------------------------------------------------------------------------
+
+# Janela pra considerar que as mencoes ao mesmo alvo sao a mesma "sessao" de insistencia.
+MENTION_WINDOW_SECONDS = 60
+# Na 2a mensagem seguida marcando a mesma pessoa ela avisa; na 3a, castigo.
+MENTION_WARN_AT = 2
+MENTION_PUNISH_AT = 3
+MENTION_TIMEOUT_SECONDS = 10 * 60
+# Repetir o MESMO @ varias vezes dentro de uma unica mensagem (@rizu @rizu @rizu @rizu).
+MENTION_SAME_TARGET_IN_ONE_MSG = 4
+# Muita gente DIFERENTE de uma vez so continua sendo tratado como raid, mas num patamar
+# em que nao da pra confundir com "marquei a galera": 5 amigos e conversa, 10 e ataque.
+MASS_MENTION_DISTINCT = 10
+# Nao punir de novo em seguida pelo mesmo motivo (separado da duracao do castigo).
+PUNISH_COOLDOWN_SECONDS = 60
+
+# So conta mencao escrita no TEXTO. message.mentions inclui o autor da mensagem
+# respondida quando o reply pinga - contar isso faria conversa normal de reply virar
+# flood de mencao, que e o falso positivo mais facil de cometer aqui.
+USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
+
+
+def mention_counts(content: str) -> Counter:
+    """Quantas vezes cada alvo foi marcado NO TEXTO da mensagem.
+
+    Devolve Counter porque a repeticao importa: o payload do Discord deduplica
+    message.mentions, entao "@rizu @rizu @rizu" chegaria como um alvo so por ali.
+    """
+    alvos = USER_MENTION_RE.findall(content or "")
+    alvos += [f"role:{r}" for r in ROLE_MENTION_RE.findall(content or "")]
+    return Counter(alvos)
+
+
+def mention_verdict(counts: Counter, historico: dict[str, int]) -> tuple[str | None, str]:
+    """Decide o que fazer com as mencoes de uma mensagem. Pura, pra poder ser testada.
+
+    `historico` e quantas mensagens recentes (dentro da janela) ja marcaram cada alvo,
+    incluindo esta. Devolve (acao, motivo), com acao em None / "avisar" / "punir".
+    """
+    if not counts:
+        return None, ""
+
+    repetido = max(counts.values())
+    if repetido >= MENTION_SAME_TARGET_IN_ONE_MSG:
+        return "punir", f"marcou a mesma pessoa {repetido}x na mesma mensagem"
+
+    if len(counts) >= MASS_MENTION_DISTINCT:
+        return "punir", f"marcou {len(counts)} pessoas de uma vez"
+
+    pico = max(historico.values(), default=0)
+    if pico >= MENTION_PUNISH_AT:
+        return "punir", f"marcou a mesma pessoa em {pico} mensagens seguidas"
+    if pico == MENTION_WARN_AT:
+        return "avisar", "insistindo na mencao"
+    return None, ""
 
 
 class ModerationView(discord.ui.View):
@@ -66,6 +133,10 @@ class ModerationCog(commands.Cog):
         # (guild_id, user_id) -> deque[(timestamp, message)]
         self.msg_log: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
         self.recently_punished: dict[tuple[int, int], float] = {}
+        # (guild, autor, alvo) -> deque[timestamp das mensagens que marcaram esse alvo]
+        self.mention_log: dict[tuple[int, int, str], deque] = defaultdict(lambda: deque(maxlen=10))
+        # Quem ja foi avisado nesta janela, pra nao repetir o aviso a cada mensagem.
+        self.mention_warned: dict[tuple[int, int], float] = {}
 
     async def notify_owner(self, guild: discord.Guild, member: discord.Member, reason: str, sample: str):
         owner = self.bot.get_user(OWNER_USER_ID) or await self.bot.fetch_user(OWNER_USER_ID)
@@ -87,13 +158,19 @@ class ModerationCog(commands.Cog):
         except discord.Forbidden:
             log.error("Nao consegui mandar DM pro dono (DMs fechadas?).")
 
-    async def punish(self, message: discord.Message, reason: str, extra_msgs: list[discord.Message] | None = None):
+    async def punish(
+        self,
+        message: discord.Message,
+        reason: str,
+        extra_msgs: list[discord.Message] | None = None,
+        timeout_seconds: int = TIMEOUT_SECONDS,
+    ):
         member = message.author
         guild = message.guild
         key = (guild.id, member.id)
 
         now = time.monotonic()
-        if key in self.recently_punished and now - self.recently_punished[key] < TIMEOUT_SECONDS:
+        if key in self.recently_punished and now - self.recently_punished[key] < PUNISH_COOLDOWN_SECONDS:
             return
         self.recently_punished[key] = now
 
@@ -107,13 +184,15 @@ class ModerationCog(commands.Cog):
                 pass
 
         try:
-            await member.timeout(timedelta(seconds=TIMEOUT_SECONDS), reason=f"Automod: {reason}")
+            await member.timeout(timedelta(seconds=timeout_seconds), reason=f"Automod: {reason}")
         except discord.Forbidden:
             log.error("Sem permissao de Moderate Members para dar timeout.")
         except discord.HTTPException:
             log.exception("Falha ao aplicar timeout")
 
-        await self.notify_owner(guild, member, reason, "\n".join(sample_lines))
+        await self.notify_owner(
+            guild, member, reason, "\n".join(sample_lines), timeout_seconds=timeout_seconds
+        )
 
     async def check_flood(self, message: discord.Message):
         if message.guild is None or message.guild.id != ALLOWED_GUILD_ID:
@@ -146,10 +225,56 @@ class ModerationCog(commands.Cog):
                 await self.punish(message, "mensagens repetidas (spam)", repeats)
                 return
 
-        # regra 3: spam de mencoes (raid-like)
-        if len(message.mentions) + len(message.role_mentions) >= FLOOD_MAX_MENTIONS:
-            await self.punish(message, "spam de mencoes", [message])
+        # regra 3: insistencia em mencionar a mesma pessoa (ver check_mentions)
+        await self.check_mentions(message)
+
+    async def check_mentions(self, message: discord.Message):
+        """Avisa antes de punir, e so pune insistencia de verdade.
+
+        A regra anterior apagava na hora qualquer mensagem com 5+ mencoes, sem aviso -
+        e "marquei 5 amigos" caiu nela em producao. Aqui a punicao exige repetir a MESMA
+        pessoa, e a pessoa recebe um aviso antes de qualquer coisa ser apagada.
+        """
+        counts = mention_counts(message.content)
+        if not counts:
             return
+
+        agora = time.monotonic()
+        historico: dict[str, int] = {}
+        for alvo in counts:
+            # Marcar a si mesmo nao e incomodo pra ninguem.
+            if alvo == str(message.author.id):
+                continue
+            registro = self.mention_log[(message.guild.id, message.author.id, alvo)]
+            registro.append(agora)
+            while registro and agora - registro[0] > MENTION_WINDOW_SECONDS:
+                registro.popleft()
+            historico[alvo] = len(registro)
+
+        acao, motivo = mention_verdict(counts, historico)
+        if acao is None:
+            return
+
+        if acao == "avisar":
+            chave = (message.guild.id, message.author.id)
+            ultimo_aviso = self.mention_warned.get(chave, 0.0)
+            if agora - ultimo_aviso < MENTION_WINDOW_SECONDS:
+                return
+            self.mention_warned[chave] = agora
+            minutos = MENTION_TIMEOUT_SECONDS // 60
+            # Nada e apagado aqui de proposito: o aviso e pra dar chance de parar.
+            await message.reply(
+                f"Opa, {message.author.display_name}, segura a mao na mencao — se continuar "
+                f"marcando a mesma pessoa eu vou te dar {minutos} minutos de castigo.",
+                mention_author=False,
+            )
+            return
+
+        # Punicao: limpa o historico pra nao repunir pela mesma sequencia assim que o
+        # cooldown acabar.
+        for alvo in counts:
+            self.mention_log.pop((message.guild.id, message.author.id, alvo), None)
+        await self.punish(message, motivo, [message], timeout_seconds=MENTION_TIMEOUT_SECONDS)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
