@@ -94,3 +94,35 @@ def test_ferramenta_pendurada_e_cancelada_por_timeout(monkeypatch):
 
     resultado = asyncio.run(tools.execute_tool("lenta", "{}"))
     assert "demorou demais" in json.loads(resultado.content)["erro"]
+
+
+def test_contexto_comeca_vazio():
+    assert tools.current_context() is None
+
+
+def test_use_context_disponibiliza_e_limpa():
+    """A identidade da requisicao vive em contextvar, nao em parametro de ferramenta:
+    se o modelo pudesse escolher o user_id, bastaria pedir "cria um lembrete pro fulano"
+    pra escrever em nome de outra pessoa."""
+    ctx = tools.ToolContext(author_id=42, author_name="rizu", channel_id=7)
+    with tools.use_context(ctx):
+        atual = tools.current_context()
+        assert atual.author_id == 42
+        assert atual.channel_id == 7
+    assert tools.current_context() is None
+
+
+def test_contexto_chega_dentro_da_ferramenta():
+    """Precisa atravessar o await do execute_tool - se nao atravessasse, toda ferramenta
+    que depende de identidade falharia em producao e passaria nos testes unitarios."""
+    visto = {}
+
+    @tools.register(name="quem", description="x", parameters={"type": "object", "properties": {}})
+    async def _quem():
+        ctx = tools.current_context()
+        visto["author_id"] = ctx.author_id if ctx else None
+        return tools.ToolResult("{}")
+
+    with tools.use_context(tools.ToolContext(author_id=99, author_name="rizu", channel_id=1)):
+        asyncio.run(tools.execute_tool("quem", "{}"))
+    assert visto["author_id"] == 99

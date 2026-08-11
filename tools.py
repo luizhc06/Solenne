@@ -13,6 +13,8 @@ sozinha quando alguem perguntava se ia chover.
 import json
 import asyncio
 import logging
+import contextlib
+import contextvars
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -47,6 +49,39 @@ class Tool:
 
 
 _REGISTRY: dict[str, Tool] = {}
+
+
+@dataclass
+class ToolContext:
+    """Quem esta falando e onde, na requisicao em andamento.
+
+    Existe pra que dados de identidade NUNCA venham do modelo. Se `criar_lembrete`
+    recebesse o user_id como parametro, bastaria alguem pedir "cria um lembrete pro
+    fulano" (ou o modelo se confundir) pra escrever no nome de outra pessoa. Assim a
+    ferramenta so consegue agir por quem realmente mandou a mensagem.
+    """
+
+    author_id: int
+    author_name: str
+    channel_id: int
+
+
+_CONTEXT: contextvars.ContextVar[ToolContext | None] = contextvars.ContextVar(
+    "solenne_tool_context", default=None
+)
+
+
+@contextlib.contextmanager
+def use_context(context: ToolContext):
+    token = _CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _CONTEXT.reset(token)
+
+
+def current_context() -> ToolContext | None:
+    return _CONTEXT.get()
 
 
 def register(name: str, description: str, parameters: dict):
