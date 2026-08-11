@@ -119,6 +119,34 @@ def load_user_messages(channel_id: int, limit: int = 50) -> list[dict]:
     return [{"author": author, "content": content} for author, content in rows]
 
 
+def search_history(channel_id: int, termo: str, limit: int = 8) -> list[dict]:
+    """Procura o termo nas mensagens ja salvas deste canal, da mais recente pra mais antiga.
+
+    O historico inteiro sempre esteve no SQLite, mas so as ultimas 20 mensagens eram
+    alcancaveis - "o que a gente falou sobre X mes passado" nao tinha resposta possivel.
+    Busca por LIKE, sem indice full-text: o volume aqui e de um servidor pessoal, e
+    trocar isso por FTS5 depois nao muda a interface.
+    """
+    termo = (termo or "").strip()
+    if not termo:
+        return []
+    # Neutraliza os curingas do LIKE: sem isso, procurar por "100%" ou "nome_arquivo"
+    # casaria com qualquer coisa, porque % e _ sao curingas dentro do padrao.
+    escapado = termo.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    padrao = f"%{escapado}%"
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT author_name, content, created_at, role FROM chat_history "
+            "WHERE channel_id = ? AND content LIKE ? ESCAPE '\\' "
+            "ORDER BY id DESC LIMIT ?",
+            (channel_id, padrao, limit),
+        ).fetchall()
+    return [
+        {"autor": r[0] or ("Solenne" if r[3] == "assistant" else "?"), "conteudo": r[1], "quando": r[2]}
+        for r in rows
+    ]
+
+
 def get_db_stats() -> dict:
     with db_conn() as conn:
         messages = conn.execute("SELECT COUNT(*) FROM chat_history").fetchone()[0]
