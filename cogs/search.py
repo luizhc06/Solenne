@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import tools
-from ai_client import _complete, THINK_LOW
+from ai_client import _complete, ai_gate, THINK_LOW
 from utils import thinking_embed, safe_edit_original
 from views import FeedbackView
 
@@ -80,11 +80,16 @@ Resultados da busca:
 
 
 async def _synthesize_search(query: str, results: list[dict]) -> str:
+    """Unica chamada de IA deste cog que ficava fora do ai_gate ate 18/08/2026 (achado do
+    conselho de agentes) - toda a serializacao/prioridade que o resto do bot respeita
+    era furada aqui, o que deixava a cota da API sem protecao numa rajada de /pesquisa
+    simultaneos."""
     results_text = "\n".join(
         f"[{i + 1}] {r['title']} - {r['snippet']}" for i, r in enumerate(results)
     )
     prompt = SEARCH_SYNTHESIS_PROMPT.format(query=query, results_text=results_text)
-    return await _complete([{"role": "user", "content": prompt}], max_tokens=1200, thinking=THINK_LOW)
+    async with ai_gate.interactive():
+        return await _complete([{"role": "user", "content": prompt}], max_tokens=1200, thinking=THINK_LOW)
 
 
 def build_search_embed(results: list[dict]) -> discord.Embed:

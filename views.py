@@ -1,8 +1,6 @@
-import asyncio
-
 import discord
 
-from user_profile import update_profile
+from user_profile import schedule_profile_update
 
 
 class FeedbackView(discord.ui.View):
@@ -15,11 +13,11 @@ class FeedbackView(discord.ui.View):
     @discord.ui.button(label="👍", style=discord.ButtonStyle.success)
     async def like(self, interaction: discord.Interaction, button: discord.ui.Button):
         note = f"Gostou de conteudo sobre: {self.topic}"
-        asyncio.create_task(update_profile(interaction.user.id, interaction.user.display_name, note))
+        schedule_profile_update(interaction.user.id, interaction.user.display_name, note)
         await interaction.response.send_message("Anotado, valeu pelo feedback! 👍", ephemeral=True)
 
     @discord.ui.button(label="👎", style=discord.ButtonStyle.danger)
     async def dislike(self, interaction: discord.Interaction, button: discord.ui.Button):
         note = f"Nao gostou / achou irrelevante conteudo sobre: {self.topic}"
-        asyncio.create_task(update_profile(interaction.user.id, interaction.user.display_name, note))
+        schedule_profile_update(interaction.user.id, interaction.user.display_name, note)
         await interaction.response.send_message("Anotado, vou ajustar. 👎", ephemeral=True)

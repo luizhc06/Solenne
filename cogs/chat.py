@@ -10,7 +10,7 @@ from discord.ext import commands
 from config import OWNER_USER_ID, NEWS_TIMEZONE, DIAS_SEMANA
 from db import load_recent_history, save_message, get_user_summary, load_user_messages
 from ai_client import ai_gate, answer_with_tools, _complete, friendly_ai_error, THINK_LOW
-from user_profile import update_profile
+from user_profile import schedule_profile_update
 from notify import notify_owner_text
 from utils import (
     thinking_embed,
@@ -153,7 +153,7 @@ async def ask_hermes(
         await loop.run_in_executor(None, save_message, channel_id, "user", author_name, user_msg)
         await loop.run_in_executor(None, save_message, channel_id, "assistant", None, reply)
 
-        asyncio.create_task(update_profile(author_id, author_name, user_msg))
+        schedule_profile_update(author_id, author_name, user_msg)
 
         return reply, embeds
 

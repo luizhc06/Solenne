@@ -15,6 +15,8 @@ from openai import (
     RateLimitError,
 )
 
+import httpx
+
 from config import (
     NVIDIA_API_KEY,
     MODEL,
@@ -23,11 +25,23 @@ from config import (
     HUMANIZE_PASS,
     DEFAULT_TEMPERATURE,
     DEFAULT_TOP_P,
+    AI_CONCURRENCY_LIMIT,
 )
 
 log = logging.getLogger("hermes-bot")
 
-client_ai = AsyncOpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=NVIDIA_API_KEY)
+# Timeout explicito e mais curto (achado do conselho, 18/08/2026): sem isto, o SDK da
+# OpenAI usa o padrao dele por baixo (read=600s, ate 2 retries proprios do SDK) -
+# empilhado sobre os proprios retries de _request() abaixo (is_transient_ai_error), uma
+# unica chamada lenta podia segurar o ai_gate por minutos. max_retries=0 no cliente
+# porque o retry de verdade ja e feito por _request(), que sabe distinguir erro
+# transitorio de definitivo (o SDK sozinho nao sabe disso).
+client_ai = AsyncOpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=NVIDIA_API_KEY,
+    timeout=httpx.Timeout(connect=5.0, read=90.0, write=10.0, pool=5.0),
+    max_retries=0,
+)
 
 
 # --------------------------------------------------------------------------------------
@@ -68,17 +82,25 @@ def thinking_kwargs(mode: str, budget: int = REASONING_BUDGET) -> dict:
 
 
 class PriorityGate:
-    """Serializa as chamadas de IA, mas deixa quem tem gente esperando passar na frente.
+    """Limita quantas chamadas de IA rodam ao mesmo tempo, mas deixa quem tem gente
+    esperando (interativo) passar na frente de tarefa de fundo.
 
-    Antes era um asyncio.Lock unico e justo (FIFO), compartilhado entre o chat e as
-    tarefas de fundo. Como o digest de noticias segura o lock por categoria (ate ~2min
-    com retry), quem mencionava a Solenne no meio do meio-dia ficava preso na fila e via
-    so o "Pensando..." parado - indistinguivel de "ela me ignorou", que e exatamente uma
-    das reclamacoes. Agora tarefa de fundo so pega a vez quando nao ha ninguem esperando.
+    Ate 18/08/2026 era um asyncio.Lock unico e justo (FIFO) - 1 chamada de IA por vez,
+    sempre, compartilhado entre chat e tarefas de fundo (digest de noticias, atualizacao
+    de perfil). Achado do conselho de agentes daquele dia: isso desperdicava capacidade
+    real da API (o teto pratico e ~40 requisicoes/minuto por conta no tier gratuito da
+    NVIDIA, bem acima do que 1 chamada serial de ~30-45s por vez consegue emitir) e
+    criava fila de ATE ~15 MINUTOS pra 20 pessoas conversando ao mesmo tempo - perto do
+    limite de 15min do token de interacao do Discord. Virou um asyncio.Semaphore(N)
+    (concurrency, ver AI_CONCURRENCY_LIMIT em config.py), mantendo a MESMA regra de
+    prioridade de antes: tarefa de fundo so pega um slot quando nao ha ninguem
+    interativo esperando por um. Concurrency=1 (padrao do construtor, nao da instancia
+    de producao abaixo) preserva o comportamento antigo exato - e o que os testes que
+    validam a ordem de prioridade sob disputa real (FIFO saturado) usam de proposito.
     """
 
-    def __init__(self):
-        self._lock = asyncio.Lock()
+    def __init__(self, concurrency: int = 1):
+        self._sem = asyncio.Semaphore(concurrency)
         self._waiting_interactive = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -88,7 +110,7 @@ class PriorityGate:
         self._waiting_interactive += 1
         self._idle.clear()
         try:
-            await self._lock.acquire()
+            await self._sem.acquire()
         finally:
             self._waiting_interactive -= 1
             if self._waiting_interactive == 0:
@@ -96,25 +118,25 @@ class PriorityGate:
         try:
             yield
         finally:
-            self._lock.release()
+            self._sem.release()
 
     @contextlib.asynccontextmanager
     async def background(self):
         while True:
             await self._idle.wait()
-            await self._lock.acquire()
+            await self._sem.acquire()
             # Um interativo pode ter chegado entre o wait e o acquire: devolve a vez.
             if self._waiting_interactive == 0:
                 break
-            self._lock.release()
+            self._sem.release()
             await asyncio.sleep(0)
         try:
             yield
         finally:
-            self._lock.release()
+            self._sem.release()
 
 
-ai_gate = PriorityGate()
+ai_gate = PriorityGate(concurrency=AI_CONCURRENCY_LIMIT)
 
 
 CRITIQUE_PROMPT = (

@@ -21,6 +21,7 @@ class AppConfig:
     reasoning_budget: int = 768
     humanize_pass: bool = False
     anilist_username: str = "Rizuw"
+    ai_concurrency_limit: int = 4
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -44,6 +45,15 @@ class AppConfig:
             reasoning_budget=int(os.environ.get("AI_REASONING_BUDGET", "768")),
             humanize_pass=os.environ.get("HUMANIZE_PASS", "0") == "1",
             anilist_username=os.environ.get("ANILIST_USERNAME", "Rizuw"),
+            # Achado do conselho de agentes (18/08/2026): o PriorityGate era um
+            # asyncio.Lock unico (1 chamada de IA por vez, sempre) - com 20 pessoas
+            # conversando ao mesmo tempo, a ultima esperava ate ~15min so pra sua vez
+            # comecar (perto do limite de 15min do token de interacao do Discord). O
+            # teto real de qualquer redesenho e a cota da API da NVIDIA (~40 req/min por
+            # conta no tier gratuito, nao publicado oficialmente); 4 concorrentes com
+            # turnos de ~30-45s cada fica bem abaixo disso com folga pra retry. Ajustar
+            # aqui depois de observar 429/RateLimitError reais em producao.
+            ai_concurrency_limit=int(os.environ.get("AI_CONCURRENCY_LIMIT", "4")),
         )
 
 try:
@@ -61,6 +71,7 @@ REFINEMENT_ROUNDS = _cfg.refinement_rounds
 REASONING_BUDGET = _cfg.reasoning_budget
 HUMANIZE_PASS = _cfg.humanize_pass
 ANILIST_USERNAME = _cfg.anilist_username
+AI_CONCURRENCY_LIMIT = _cfg.ai_concurrency_limit
 HISTORY_WINDOW = 20
 
 # Recomendacao oficial da NVIDIA pro Nemotron 3 Super: temperature 1.0 e top_p 0.95

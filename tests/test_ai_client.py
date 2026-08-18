@@ -99,6 +99,53 @@ def test_priority_gate_deixa_o_chat_passar_na_frente_do_digest():
     assert asyncio.run(cenario()) == ["chat", "digest"]
 
 
+def test_priority_gate_com_concurrency_maior_que_1_roda_em_paralelo():
+    """O ganho central da mudanca de 18/08/2026 (achado do conselho de agentes): antes
+    (Lock unico, concurrency implicito 1) NENHUMA chamada rodava ao mesmo tempo que
+    outra - com concurrency=N, ate N tarefas podem estar dentro do gate ao mesmo tempo.
+    """
+    async def cenario():
+        gate = PriorityGate(concurrency=2)
+        pico_simultaneo = 0
+        dentro_agora = 0
+
+        async def tarefa():
+            nonlocal pico_simultaneo, dentro_agora
+            async with gate.interactive():
+                dentro_agora += 1
+                pico_simultaneo = max(pico_simultaneo, dentro_agora)
+                await asyncio.sleep(0.02)
+                dentro_agora -= 1
+
+        await asyncio.gather(tarefa(), tarefa(), tarefa())
+        return pico_simultaneo
+
+    # 3 tarefas, 2 slots: o pico tem que chegar a 2 (nunca as 3 juntas, nunca so 1 por vez).
+    assert asyncio.run(cenario()) == 2
+
+
+def test_priority_gate_com_concurrency_1_continua_totalmente_serial():
+    """Garante que o default do construtor (usado pelos testes de prioridade acima)
+    preserva o comportamento antigo exato - nunca duas tarefas dentro ao mesmo tempo."""
+    async def cenario():
+        gate = PriorityGate()  # concurrency=1, mesmo default de sempre
+        pico_simultaneo = 0
+        dentro_agora = 0
+
+        async def tarefa():
+            nonlocal pico_simultaneo, dentro_agora
+            async with gate.interactive():
+                dentro_agora += 1
+                pico_simultaneo = max(pico_simultaneo, dentro_agora)
+                await asyncio.sleep(0.01)
+                dentro_agora -= 1
+
+        await asyncio.gather(tarefa(), tarefa(), tarefa())
+        return pico_simultaneo
+
+    assert asyncio.run(cenario()) == 1
+
+
 def _status_error(code: int):
     request = httpx.Request("POST", "https://integrate.api.nvidia.com/v1/chat/completions")
     response = httpx.Response(code, request=request)

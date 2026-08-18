@@ -16,7 +16,18 @@ BACKUP_RETENTION_DAYS = 7
 
 def db_conn() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    return sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    # WAL (achado do conselho de agentes, 18/08/2026): no modo padrao (rollback
+    # journal), UM escritor trava o arquivo INTEIRO - com 20 conversas simultaneas cada
+    # uma gravando historico/perfil, mais o backup diario (que le o banco inteiro numa
+    # unica transacao), a chance de "database is locked" sobe com o trafego. WAL deixa
+    # leitores nunca bloquearem escritores (e vice-versa); e persistido no proprio
+    # arquivo do banco, mas idempotente/barato reafirmar em toda conexao. busy_timeout
+    # aqui so reforca o timeout=10 acima (SQLITE_BUSY entra na espera do busy_timeout
+    # antes do timeout do driver Python valer).
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    return conn
 
 
 def init_db():
