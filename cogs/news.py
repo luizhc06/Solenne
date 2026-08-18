@@ -82,6 +82,17 @@ query ($name: String) {
 
 _anilist_cache = TTLCache(ANILIST_CACHE_TTL_SECONDS)
 
+# Jogos que o dono acompanha de perto (pedido explicito, 18/08/2026 - perfil real da
+# Steam: Counter-Strike 2 e Rainbow Six Siege sao disparados os mais jogados, 1.368h e
+# 460h respectivamente). Injetado junto do perfil AniList no contexto de curadoria da
+# categoria Geek - prioriza SEM excluir o resto (a categoria continua "Geek & Anime",
+# nao vira feed exclusivo de jogo especifico).
+GEEK_JOGOS_ACOMPANHADOS = (
+    "Counter-Strike 2, Rainbow Six Siege, jogos da Rockstar Games (GTA, Red Dead "
+    "Redemption), Atomic Heart, Team Fortress 2, Deep Rock Galactic, Left 4 Dead, "
+    "Apex Legends, Cyberpunk 2077, War Thunder"
+)
+
 
 def _fetch_anilist_interest_sync() -> str:
     """Resumo curto (generos favoritos + series bem avaliadas) do perfil AniList do
@@ -144,14 +155,30 @@ NEWS_CATEGORIES = {
         "label": "🎌 Geek & Anime",
         "foco": "anime, manga, jogos e cultura geek",
         "color": discord.Color.blue(),
+        # PC Gamer adicionado em 18/08/2026 (pedido do usuario: mais noticia dos jogos
+        # que ele acompanha) - os 2 feeds antigos sao so anime, "Geek & Anime" nunca
+        # teve cobertura de jogo de verdade. Testado ao vivo antes de adicionar (feed
+        # atualizado no mesmo dia). Ver GEEK_JOGOS_ACOMPANHADOS pra qual jogo priorizar.
         "feeds": [
             ("Anime News Network", "https://www.animenewsnetwork.com/newsfeed/rss.xml"),
             ("MyAnimeList", "https://myanimelist.net/rss/news.xml"),
+            ("PC Gamer", "https://www.pcgamer.com/rss/"),
         ],
     },
     "tecnologia": {
         "label": "💻 Tecnologia & Hardware",
-        "foco": "hardware, componentes, PCs, consoles e a industria de tecnologia",
+        # Achado do conselho de agentes (18/08/2026): sem uma barra explicita de
+        # relevancia, a curadoria deixava passar review de produto de nicho e rumor
+        # fraco so por estarem no feed. Agora o "foco" pede explicitamente pra ser
+        # exigente - o TETO por categoria (NEWS_MAX_ITEMS_PER_CATEGORY) ja permite
+        # devolver so 1 ou 0 itens num dia fraco, isso so reforça o criterio.
+        "foco": (
+            "hardware, componentes, PCs, consoles e a industria de tecnologia - SO o que "
+            "tem impacto real: lancamento importante, mudanca real de mercado, avanco "
+            "tecnico significativo. Descarte review de produto de nicho, rumor fraco/nao "
+            "confirmado, e noticia de interesse so regional ou pequeno - preferio devolver "
+            "menos itens (ou nenhum) do que encher com noticia morna"
+        ),
         "color": discord.Color.dark_blue(),
         "feeds": [
             ("Tom's Hardware", "https://www.tomshardware.com/feeds/all"),
@@ -180,7 +207,21 @@ NEWS_CATEGORIES = {
     },
     "brasil": {
         "label": "🇧🇷 Brasil",
-        "foco": "acontecimentos NO Brasil ou que afetam diretamente o Brasil. Noticia de outro pais que so foi publicada por um veiculo brasileiro NAO conta",
+        # Achado do conselho de agentes (18/08/2026, pedido explicito do usuario):
+        # politica de rotina virou maioria dos dias porque os feeds (G1 geral) sao
+        # dominados por ela - a curadoria escolhia entre o que tinha, e o que tinha
+        # era politica. Agora o foco pede explicitamente pra so entrar politica
+        # quando for impacto real, nao debate/disputa do dia a dia de Brasilia.
+        "foco": (
+            "acontecimentos NO Brasil ou que afetam diretamente o Brasil. Noticia de outro "
+            "pais que so foi publicada por um veiculo brasileiro NAO conta. Politica de "
+            "ROTINA (embate entre politicos, disputa partidaria, declaracao de autoridade, "
+            "movimentacao eleitoral comum) NAO e prioridade e deve ser descartada na "
+            "maioria dos casos - so inclua politica se for algo de impacto real e direto na "
+            "vida das pessoas (mudanca de lei que afeta o bolso, decisao economica "
+            "relevante, crise institucional grave). Prefira economia, tecnologia, ciencia e "
+            "fatos que afetam o dia a dia de verdade"
+        ),
         "color": discord.Color.gold(),
         # ATENCAO: o antigo feed "dynamo/brasil/rss2.xml" responde 200 mas esta
         # congelado desde maio/2023 - todo item caia fora do cutoff e a categoria
@@ -524,20 +565,38 @@ async def _summarize_category(items: list[dict], interest_hint: str = "", foco: 
     return items[:NEWS_MAX_ITEMS_PER_CATEGORY]
 
 
-def build_item_embed(category: dict, item: dict) -> discord.Embed:
+def build_item_embed(category: dict, item: dict, destaque: bool = False) -> discord.Embed:
+    """`destaque=True` pro primeiro item de cada categoria (achado do usuario 18/08/2026:
+    melhorar a aparencia do digest) - imagem GRANDE (set_image) em vez de miniatura no
+    canto (set_thumbnail), pra dar hierarquia visual real entre a materia mais
+    importante da categoria e o resto, em vez de todos os cards saírem identicos."""
     titulo = item.get("title_pt") or item["title"]
     resumo = item.get("summary_pt") or item["summary"] or "(sem resumo disponivel)"
     embed = discord.Embed(
         # Corta na palavra em vez de no caractere: o corte seco em 250/400 deixava
         # titulo terminando no meio de uma palavra quando o fallback sem traducao entrava.
-        title=truncate_words(titulo, NEWS_TITLE_MAX_CHARS),
+        title=("⭐ " if destaque else "") + truncate_words(titulo, NEWS_TITLE_MAX_CHARS),
         description=truncate_words(resumo, NEWS_SUMMARY_MAX_CHARS),
         url=item["link"],
         color=category["color"],
     )
     if item.get("image"):
-        embed.set_thumbnail(url=item["image"])
+        if destaque:
+            embed.set_image(url=item["image"])
+        else:
+            embed.set_thumbnail(url=item["image"])
     embed.set_footer(text=f"Fonte: {item['source']}")
+    return embed
+
+
+def build_category_header_embed(category: dict) -> discord.Embed:
+    """Separador de categoria como embed pequeno, na cor da categoria - substitui o
+    antigo `# {label}` em texto markdown solto (achado do usuario 18/08/2026: melhorar
+    a aparencia). Fica no MESMO bloco visual dos cards (mesma mensagem do Discord, ver
+    post_news_digest) em vez de ser uma mensagem de texto crua quebrando o visual entre
+    os embeds."""
+    embed = discord.Embed(color=category["color"])
+    embed.set_author(name=category["label"])
     return embed
 
 
@@ -656,7 +715,12 @@ async def build_news_digest(interactive: bool = False):
             raw_items = await loop.run_in_executor(None, _collect_category_items, category)
             interest_hint = ""
             if key == "geek":
-                interest_hint = await loop.run_in_executor(None, _fetch_anilist_interest_sync)
+                anilist_hint = await loop.run_in_executor(None, _fetch_anilist_interest_sync)
+                interest_hint = (
+                    f"{anilist_hint} Jogos que acompanha de perto: {GEEK_JOGOS_ACOMPANHADOS}."
+                    if anilist_hint
+                    else f"Jogos que acompanha de perto: {GEEK_JOGOS_ACOMPANHADOS}."
+                )
             # So a chamada de IA fica dentro do portao global - o post automatico e um
             # /noticias manual rodando ao mesmo tempo nao devem martelar a API da NVIDIA
             # em paralelo (isso agrava 504s la e ja causou digest incompleto). Como o
@@ -678,7 +742,7 @@ async def build_news_digest(interactive: bool = False):
             sem_relevancia.append(category["label"])
             continue
 
-        embeds = [build_item_embed(category, item) for item in curated]
+        embeds = [build_item_embed(category, item, destaque=(i == 0)) for i, item in enumerate(curated)]
         sections.append((category, curated, embeds))
         await loop.run_in_executor(None, mark_news_posted, [it["link"] for it in curated])
     return sections, skipped, sem_relevancia
@@ -720,9 +784,12 @@ async def post_news_digest(channel: discord.TextChannel, interactive: bool = Fal
         content=None, embed=header_embed
     )
     for category, _curated, embeds in sections:
-        await channel.send(f"# {category['label']}")
+        # Cabecalho de categoria vira embed na mesma mensagem dos cards (achado do
+        # usuario 18/08/2026: melhorar a aparencia) - ate 10 embeds cabem numa mensagem
+        # do Discord, e o teto daqui e 1 + NEWS_MAX_ITEMS_PER_CATEGORY (5), bem dentro.
+        todos_embeds = [build_category_header_embed(category)] + embeds
         try:
-            await channel.send(embeds=embeds, view=FeedbackView(category["label"]))
+            await channel.send(embeds=todos_embeds, view=FeedbackView(category["label"]))
         except discord.HTTPException:
             log.exception("Erro ao enviar embeds da categoria %s", category["label"])
             await channel.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
