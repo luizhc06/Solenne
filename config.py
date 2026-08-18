@@ -22,6 +22,7 @@ class AppConfig:
     humanize_pass: bool = False
     anilist_username: str = "Rizuw"
     ai_concurrency_limit: int = 4
+    tavily_api_key: str = ""
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -54,6 +55,9 @@ class AppConfig:
             # turnos de ~30-45s cada fica bem abaixo disso com folga pra retry. Ajustar
             # aqui depois de observar 429/RateLimitError reais em producao.
             ai_concurrency_limit=int(os.environ.get("AI_CONCURRENCY_LIMIT", "4")),
+            # Feature flag da troca de fonte de busca (18/08/2026, ver cogs/search.py):
+            # vazio = continua 100% no scraping do DuckDuckGo, como sempre foi.
+            tavily_api_key=os.environ.get("TAVILY_API_KEY", ""),
         )
 
 try:
@@ -72,6 +76,7 @@ REASONING_BUDGET = _cfg.reasoning_budget
 HUMANIZE_PASS = _cfg.humanize_pass
 ANILIST_USERNAME = _cfg.anilist_username
 AI_CONCURRENCY_LIMIT = _cfg.ai_concurrency_limit
+TAVILY_API_KEY = _cfg.tavily_api_key
 HISTORY_WINDOW = 20
 
 # Recomendacao oficial da NVIDIA pro Nemotron 3 Super: temperature 1.0 e top_p 0.95

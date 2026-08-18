@@ -12,12 +12,18 @@ from discord.ext import commands
 
 import tools
 from ai_client import _complete, ai_gate, THINK_LOW
+from config import TAVILY_API_KEY
 from utils import thinking_embed, safe_edit_original
 from views import FeedbackView
 
 log = logging.getLogger("hermes-bot")
 
-SEARCH_MIN_SOURCES = 5
+# Achado do conselho de agentes (18/08/2026): 5 fontes e uma barra alta pra tema
+# nichado/recente/em portugues, e a tool automatica (tool_pesquisar_web, mais abaixo)
+# nunca teve esse piso - so falhava com lista TOTALMENTE vazia. Baixado pra 3 e
+# unificado entre os dois caminhos: sintetiza com o que tem, com poucas fontes ainda e
+# melhor que recusar a resposta inteira por um numero arbitrario.
+SEARCH_MIN_SOURCES = 3
 SEARCH_MAX_SOURCES = 8
 
 DDG_RESULT_RE = re.compile(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
@@ -37,7 +43,50 @@ def _extract_real_url(ddg_href: str) -> str:
     return full
 
 
-def _web_search_sync(query: str, max_results: int = SEARCH_MAX_SOURCES) -> list[dict]:
+def _web_search_tavily(query: str, max_results: int) -> list[dict] | None:
+    """API de busca de verdade (achado do conselho de agentes, 18/08/2026): o scraping
+    do DDG abaixo e fragil (sem contrato, quebra em silencio se o HTML deles mudar,
+    fonte unica, sem cache). Tavily e feita sob medida pra uso por LLM (devolve texto ja
+    limpo, sem HTML pra tratar) e tem tier gratuito de 1.000 buscas/mes sem cartao.
+
+    Devolve None (nao lista vazia) quando a Tavily nao respondeu ou nao esta
+    configurada - e o sinal pro chamador cair pro DDG como fallback, em vez de tratar
+    "Tavily fora do ar" como "nenhum resultado existe".
+    """
+    if not TAVILY_API_KEY:
+        return None
+    try:
+        resp = httpx.post(
+            "https://api.tavily.com/search",
+            headers={"Authorization": f"Bearer {TAVILY_API_KEY}", "Content-Type": "application/json"},
+            json={"query": query, "max_results": max_results},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception:
+        log.exception("Erro ao pesquisar via Tavily '%s' - caindo pro DuckDuckGo", query)
+        return None
+
+    try:
+        dados = resp.json()
+    except ValueError:
+        log.error("Tavily respondeu 200 com corpo que nao e JSON - caindo pro DuckDuckGo")
+        return None
+
+    results = []
+    for r in dados.get("results", []):
+        title = (r.get("title") or "").strip()
+        url = (r.get("url") or "").strip()
+        snippet = (r.get("content") or "").strip()
+        if title and url:
+            results.append({"title": title, "url": url, "snippet": snippet})
+    return results
+
+
+def _web_search_ddg(query: str, max_results: int) -> list[dict]:
+    """Scraping do HTML do DuckDuckGo - fallback quando a Tavily nao esta configurada
+    ou esta fora do ar. Mantido de proposito (nao removido): funciona sem chave/custo
+    nenhum, so nao e a fonte primaria mais."""
     try:
         resp = httpx.get(
             "https://html.duckduckgo.com/html/",
@@ -48,7 +97,7 @@ def _web_search_sync(query: str, max_results: int = SEARCH_MAX_SOURCES) -> list[
         )
         resp.raise_for_status()
     except Exception:
-        log.exception("Erro ao pesquisar '%s'", query)
+        log.exception("Erro ao pesquisar '%s' no DuckDuckGo", query)
         return []
 
     titles = DDG_RESULT_RE.findall(resp.text)
@@ -62,6 +111,13 @@ def _web_search_sync(query: str, max_results: int = SEARCH_MAX_SOURCES) -> list[
         if title and url:
             results.append({"title": title, "url": url, "snippet": snippet})
     return results
+
+
+def _web_search_sync(query: str, max_results: int = SEARCH_MAX_SOURCES) -> list[dict]:
+    resultados = _web_search_tavily(query, max_results)
+    if resultados is not None:
+        return resultados
+    return _web_search_ddg(query, max_results)
 
 
 SEARCH_SYNTHESIS_PROMPT = """Voce recebeu resultados reais de uma busca na web sobre uma pergunta.
@@ -94,21 +150,21 @@ async def _synthesize_search(query: str, results: list[dict]) -> str:
 
 def build_search_embed(results: list[dict]) -> discord.Embed:
     embed = discord.Embed(color=discord.Color.light_grey())
-    embed.set_author(name="Fontes utilizadas", icon_url="https://duckduckgo.com/favicon.ico")
+    embed.set_author(name="🔎 Fontes utilizadas")
     fontes = "\n".join(f"**[{i + 1}]** [{r['title'][:80]}]({r['url']})" for i, r in enumerate(results))
     embed.description = fontes[:4000]
     return embed
 
 
-# Gatilho de busca automatica em chat livre: restrito a variacoes de "pesquis-"
-# (pesquise, pesquisa, pesquisar) de proposito, pra nao disparar em palavras do
-# dia a dia tipo "buscar"/"procurar" e evitar estourar contexto/armazenamento
-# com buscas nao intencionais.
+# A decisao de buscar na web e 100% do modelo via tool-calling (pesquisar_web, mais
+# abaixo) ou do comando explicito /pesquisa - nao existe mais gatilho por palavra-chave
+# em chat livre (comentario antigo sobre "variacoes de pesquis-" removido em 18/08/2026,
+# achado do conselho de agentes: nao correspondia mais ao codigo real).
 class SearchCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="pesquisa", description="Pesquisa na web (minimo 5 fontes) e resume com links")
+    @app_commands.command(name="pesquisa", description="Pesquisa na web e resume com links das fontes")
     @app_commands.describe(termo="O que voce quer pesquisar")
     async def pesquisa(self, interaction: discord.Interaction, termo: str):
         await interaction.response.send_message(
@@ -117,13 +173,10 @@ class SearchCog(commands.Cog):
         loop = asyncio.get_event_loop()
 
         results = await loop.run_in_executor(None, _web_search_sync, termo)
-        if len(results) < SEARCH_MIN_SOURCES:
+        if not results:
             await safe_edit_original(
                 interaction,
-                content=(
-                    f"So encontrei {len(results)} fonte(s) confiavel(is) pra isso, "
-                    "menos do que o minimo de 5. Tenta reformular a pesquisa."
-                ),
+                content="Nao encontrei nenhuma fonte confiavel pra isso. Tenta reformular a pesquisa.",
                 embed=None,
             )
             return
@@ -138,7 +191,11 @@ class SearchCog(commands.Cog):
             return
 
         embed = build_search_embed(results)
-        await safe_edit_original(interaction, content=answer[:2000], embed=embed, view=FeedbackView(termo))
+        # Poucas fontes nao bloqueia mais a resposta inteira (achado do conselho de
+        # agentes: bloquear jogava fora informacao real por causa de um numero
+        # arbitrario) - so avisa a contagem, pra quem le decidir o quanto confiar.
+        aviso = f"-# ⚠️ Encontrei só {len(results)} fonte(s) pra isso.\n" if len(results) < SEARCH_MIN_SOURCES else ""
+        await safe_edit_original(interaction, content=f"{aviso}{answer}"[:2000], embed=embed, view=FeedbackView(termo))
 
 
 async def setup(bot: commands.Bot):
