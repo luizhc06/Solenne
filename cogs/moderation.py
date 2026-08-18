@@ -15,6 +15,12 @@ FLOOD_WINDOW_SECONDS = 5
 FLOOD_MAX_MESSAGES = 5
 FLOOD_MAX_DUPLICATES = 3
 TIMEOUT_SECONDS = 60
+# Achado do conselho de 18/08/2026: ao contrario da regra de mencao (que ja avisa antes
+# de punir), a regra 1 (muitas mensagens seguidas) apagava e aplicava timeout na hora -
+# facil de bater organicamente numa reacao empolgada em sequencia ("kkkk", "mds", "top").
+# Agora segue o mesmo padrao: primeira vez que bate o limiar, so avisa; se persistir
+# dentro do cooldown, ai pune.
+FLOOD_WARN_COOLDOWN_SECONDS = FLOOD_WINDOW_SECONDS * 4
 
 # ---------------------------------------------------------------------------------
 # Mencoes
@@ -85,12 +91,13 @@ def mention_verdict(counts: Counter, historico: dict[str, int]) -> tuple[str | N
 
 
 class ModerationView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, member: discord.Member, reason: str):
+    def __init__(self, guild: discord.Guild, member: discord.Member, reason: str, timeout_seconds: int = TIMEOUT_SECONDS):
         super().__init__(timeout=None)
         self.guild = guild
         self.member_id = member.id
         self.member_display = str(member)
         self.reason = reason
+        self.timeout_seconds = timeout_seconds
 
     @discord.ui.button(label="Banir", style=discord.ButtonStyle.danger, emoji="🔨")
     async def ban_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -122,7 +129,7 @@ class ModerationView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(
-            content=f"↩️ Ignorado. **{self.member_display}** so ficou com o timeout de {TIMEOUT_SECONDS}s.",
+            content=f"↩️ Ignorado. **{self.member_display}** so ficou com o timeout de {self.timeout_seconds}s.",
             view=self,
         )
 
@@ -137,22 +144,29 @@ class ModerationCog(commands.Cog):
         self.mention_log: dict[tuple[int, int, str], deque] = defaultdict(lambda: deque(maxlen=10))
         # Quem ja foi avisado nesta janela, pra nao repetir o aviso a cada mensagem.
         self.mention_warned: dict[tuple[int, int], float] = {}
+        # Mesma ideia, pra regra 1 (muitas mensagens seguidas) do check_flood.
+        self.flood_warned: dict[tuple[int, int], float] = {}
 
-    async def notify_owner(self, guild: discord.Guild, member: discord.Member, reason: str, sample: str):
+    async def notify_owner(
+        self, guild: discord.Guild, member: discord.Member, reason: str, sample: str, timeout_seconds: int = TIMEOUT_SECONDS
+    ):
         owner = self.bot.get_user(OWNER_USER_ID) or await self.bot.fetch_user(OWNER_USER_ID)
         if owner is None:
             log.error("Nao encontrei o usuario dono (OWNER_USER_ID) para notificar.")
             return
         embed = discord.Embed(
             title="🚨 Flood detectado",
-            description=f"**Usuario:** {member.mention} (`{member}` / `{member.id}`)\n**Motivo:** {reason}",
+            description=(
+                f"**Usuario:** {member.mention} (`{member}` / `{member.id}`)\n"
+                f"**Motivo:** {reason}\n**Timeout aplicado:** {timeout_seconds}s"
+            ),
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
         if sample:
             embed.add_field(name="Amostra", value=sample[:1000], inline=False)
         embed.set_footer(text=f"Servidor: {guild.name}")
-        view = ModerationView(guild, member, reason)
+        view = ModerationView(guild, member, reason, timeout_seconds)
         try:
             await owner.send(embed=embed, view=view)
         except discord.Forbidden:
@@ -210,9 +224,21 @@ class ModerationCog(commands.Cog):
         while log_deque and now - log_deque[0][0] > FLOOD_WINDOW_SECONDS:
             log_deque.popleft()
 
-        # regra 1: muitas mensagens seguidas
+        # regra 1: muitas mensagens seguidas — avisa antes de punir (ver
+        # FLOOD_WARN_COOLDOWN_SECONDS), mesmo padrao ja usado pra mencao.
         if len(log_deque) >= FLOOD_MAX_MESSAGES:
             recent_msgs = [m for _, m in log_deque]
+            chave = (message.guild.id, member.id)
+            ultimo_aviso = self.flood_warned.get(chave, 0.0)
+            if now - ultimo_aviso >= FLOOD_WARN_COOLDOWN_SECONDS:
+                self.flood_warned[chave] = now
+                # Nada e apagado aqui de proposito: o aviso e pra dar chance de segurar o ritmo.
+                await message.reply(
+                    f"Opa, {member.display_name}, calma no ritmo — muita mensagem seguida "
+                    f"em pouco tempo. Se continuar assim eu vou ter que te dar um tempo.",
+                    mention_author=False,
+                )
+                return
             await self.punish(message, f"{len(recent_msgs)} mensagens em {FLOOD_WINDOW_SECONDS}s", recent_msgs)
             return
 

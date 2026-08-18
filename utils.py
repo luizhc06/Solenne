@@ -1,7 +1,10 @@
 import re
 import time
+import logging
 
 import discord
+
+log = logging.getLogger("hermes-bot")
 
 AMBIENT_CHANNEL_NAMES = {"geral", "comidas", "bot", "videojogos-geral"}
 AMBIENT_COOLDOWN_SECONDS = 180
@@ -102,6 +105,39 @@ def split_discord_message(text: str, limit: int = 1900) -> list[str]:
     if text:
         pedacos.append(text)
     return [p for p in pedacos if p]
+
+
+async def safe_edit_original(interaction: discord.Interaction, **kwargs) -> None:
+    """Edita a resposta original da interacao, com fallback se o token ja expirou.
+
+    O token do webhook de uma interacao expira 15min depois do comando (API do
+    Discord) - com a fila de IA sob carga (achado do conselho, 18/08/2026), uma
+    resposta pode demorar o suficiente pra passar disso. Sem este helper, cada
+    comando repetia o mesmo try/except (ou nem tinha) e o "Pensando..." ficava
+    parado pra sempre, sem ninguem saber o motivo. Aceita os mesmos kwargs de
+    Interaction.edit_original_response (content/embed/embeds/view).
+    """
+    try:
+        await interaction.edit_original_response(**kwargs)
+    except discord.HTTPException:
+        log.warning("Token da interacao expirou antes da resposta - mandando no canal direto.")
+        embeds = kwargs.get("embeds")
+        if embeds is None:
+            embed = kwargs.get("embed")
+            embeds = [embed] if embed is not None else []
+        send_kwargs: dict = {"embeds": embeds}
+        if kwargs.get("view") is not None:
+            send_kwargs["view"] = kwargs["view"]
+        await interaction.channel.send(kwargs.get("content") or None, **send_kwargs)
+
+
+async def safe_followup_send(interaction: discord.Interaction, content, **kwargs) -> None:
+    """Mesma ideia de safe_edit_original, pra followup.send (ver docstring acima)."""
+    try:
+        await interaction.followup.send(content, **kwargs)
+    except discord.HTTPException:
+        log.warning("Token da interacao expirou antes do followup - mandando no canal direto.")
+        await interaction.channel.send(content, **kwargs)
 
 
 def thinking_embed(text: str | None = None, eta_seconds: int = THINKING_ETA_SECONDS) -> discord.Embed:

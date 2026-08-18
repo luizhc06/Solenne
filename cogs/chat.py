@@ -18,6 +18,8 @@ from utils import (
     looks_like_question,
     mentions_solenne,
     split_discord_message,
+    safe_edit_original,
+    safe_followup_send,
     AMBIENT_COOLDOWN_SECONDS,
 )
 from views import FeedbackView
@@ -282,14 +284,15 @@ class ChatCog(commands.Cog):
         partes = split_discord_message(reply) or [
             "Fiquei sem palavras aqui (resposta veio vazia). Pergunta de novo?"
         ]
-        await interaction.edit_original_response(
+        await safe_edit_original(
+            interaction,
             content=partes[0],
             embeds=embeds if len(partes) == 1 else [],
             view=FeedbackView(pergunta[:200]),
         )
         for i, parte in enumerate(partes[1:], start=1):
             ultimo = i == len(partes) - 1
-            await interaction.followup.send(parte, embeds=embeds if ultimo else [])
+            await safe_followup_send(interaction, parte, embeds=embeds if ultimo else [])
 
     @app_commands.command(name="resumo", description="Resume o que rolou de conversa recente no canal")
     @app_commands.describe(mensagens="Quantas mensagens analisar (10-100, padrao 50)")
@@ -299,12 +302,12 @@ class ChatCog(commands.Cog):
             summary = await summarize_channel(interaction.channel_id, mensagens)
         except Exception:
             log.exception("Erro ao resumir canal")
-            await interaction.followup.send("Deu ruim ao tentar resumir as fofocas desse canal, tenta de novo.")
+            await safe_followup_send(interaction, "Deu ruim ao tentar resumir as fofocas desse canal, tenta de novo.")
             return
         if not summary:
-            await interaction.followup.send("Nao encontrei historico de conversa registrado nesse canal ainda.")
+            await safe_followup_send(interaction, "Nao encontrei historico de conversa registrado nesse canal ainda.")
             return
-        await interaction.followup.send(summary[:2000])
+        await safe_followup_send(interaction, summary[:2000])
 
     @app_commands.command(name="help", description="Mostra os comandos da Solenne")
     async def help_cmd(self, interaction: discord.Interaction):

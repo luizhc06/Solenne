@@ -14,7 +14,7 @@ from discord.ext import commands
 
 import tools
 from ai_client import ai_gate, _complete, THINK_LOW
-from utils import thinking_embed
+from utils import thinking_embed, safe_edit_original
 from views import FeedbackView
 
 log = logging.getLogger("hermes-bot")
@@ -135,16 +135,18 @@ class LinkSummaryCog(commands.Cog):
         try:
             title, summary = await summarize_url(url.strip())
         except UnsafeURLError as e:
-            await interaction.edit_original_response(content=str(e), embed=None)
+            await safe_edit_original(interaction, content=str(e), embed=None)
             return
         except httpx.HTTPStatusError as e:
-            await interaction.edit_original_response(
+            await safe_edit_original(
+                interaction,
                 content=f"A pagina respondeu {e.response.status_code}, nao consegui ler.", embed=None
             )
             return
         except Exception:
             log.exception("Erro ao resumir link %s", url)
-            await interaction.edit_original_response(
+            await safe_edit_original(
+                interaction,
                 content="Deu erro ao abrir esse link, tenta de novo ou confere se ele esta certo.", embed=None
             )
             return
@@ -156,7 +158,7 @@ class LinkSummaryCog(commands.Cog):
             color=discord.Color.teal(),
         )
         embed.set_footer(text="Resumo do conteudo real da pagina")
-        await interaction.edit_original_response(content=None, embed=embed, view=FeedbackView(title[:200] or url))
+        await safe_edit_original(interaction, content=None, embed=embed, view=FeedbackView(title[:200] or url))
 
 
 async def setup(bot: commands.Bot):

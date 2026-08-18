@@ -12,7 +12,7 @@ from discord.ext import commands
 
 import tools
 from ai_client import _complete, THINK_LOW
-from utils import thinking_embed
+from utils import thinking_embed, safe_edit_original
 from views import FeedbackView
 
 log = logging.getLogger("hermes-bot")
@@ -113,7 +113,8 @@ class SearchCog(commands.Cog):
 
         results = await loop.run_in_executor(None, _web_search_sync, termo)
         if len(results) < SEARCH_MIN_SOURCES:
-            await interaction.edit_original_response(
+            await safe_edit_original(
+                interaction,
                 content=(
                     f"So encontrei {len(results)} fonte(s) confiavel(is) pra isso, "
                     "menos do que o minimo de 5. Tenta reformular a pesquisa."
@@ -126,13 +127,13 @@ class SearchCog(commands.Cog):
             answer = await _synthesize_search(termo, results)
         except Exception:
             log.exception("Erro ao sintetizar pesquisa sobre '%s'", termo)
-            await interaction.edit_original_response(
-                content="Encontrei fontes mas deu erro ao resumir, tenta de novo.", embed=None
+            await safe_edit_original(
+                interaction, content="Encontrei fontes mas deu erro ao resumir, tenta de novo.", embed=None
             )
             return
 
         embed = build_search_embed(results)
-        await interaction.edit_original_response(content=answer[:2000], embed=embed, view=FeedbackView(termo))
+        await safe_edit_original(interaction, content=answer[:2000], embed=embed, view=FeedbackView(termo))
 
 
 async def setup(bot: commands.Bot):
