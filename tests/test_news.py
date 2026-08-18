@@ -4,9 +4,8 @@ import discord
 
 from cogs.news import (
     _summarize_anilist_entries,
-    build_category_header_embed,
+    build_category_embed,
     build_curated_items,
-    build_item_embed,
     dedup_same_story,
     flatten_curated,
     interleave_by_source,
@@ -262,30 +261,36 @@ def test_summarize_anilist_entries_handles_missing_fields():
 _CATEGORIA_TESTE = {"label": "🎌 Geek & Anime", "color": discord.Color.blue()}
 
 
-def test_item_destaque_usa_imagem_grande_e_marcador_no_titulo():
-    """Melhoria de aparencia (18/08/2026): o primeiro item de cada categoria ganha
-    hierarquia visual real (imagem grande) em vez de sair identico aos demais."""
-    item = {"title": "Titulo original", "summary": "resumo", "link": "https://x.com", "source": "X", "image": "https://x.com/img.png"}
+def test_categoria_embed_usa_titulo_cor_e_imagem_do_destaque():
+    """Redesign de aparencia (18/08/2026, 2a rodada - usuario reportou "muito ruim de
+    visualizar" com print do celular): 1 embed por categoria em vez de 1 cabecalho +
+    1 embed por noticia. A imagem grande vem só do primeiro item (destaque)."""
+    itens = [
+        {"title": "Original 1", "title_pt": "Primeiro", "summary_pt": "resumo 1 traduzido",
+         "summary": "s1", "link": "https://x.com/1", "source": "X", "image": "https://x.com/img.png"},
+        {"title": "Original 2", "title_pt": "Segundo", "summary_pt": "resumo 2 traduzido",
+         "summary": "s2", "link": "https://x.com/2", "source": "Y", "image": None},
+    ]
+    embed = build_category_embed(_CATEGORIA_TESTE, itens)
 
-    normal = build_item_embed(_CATEGORIA_TESTE, item, destaque=False)
-    destaque = build_item_embed(_CATEGORIA_TESTE, item, destaque=True)
-
-    assert normal.title == "Titulo original"
-    assert normal.thumbnail.url == "https://x.com/img.png"
-    assert normal.image.url is None
-
-    assert destaque.title == "⭐ Titulo original"
-    assert destaque.image.url == "https://x.com/img.png"
-    assert destaque.thumbnail.url is None
-
-
-def test_item_sem_imagem_nao_quebra_em_nenhum_dos_dois_modos():
-    item = {"title": "Sem imagem", "summary": "resumo", "link": "https://x.com", "source": "X", "image": None}
-    assert build_item_embed(_CATEGORIA_TESTE, item, destaque=False).image.url is None
-    assert build_item_embed(_CATEGORIA_TESTE, item, destaque=True).image.url is None
+    assert embed.title == "🎌 Geek & Anime"
+    assert embed.color == discord.Color.blue()
+    assert embed.image.url == "https://x.com/img.png"
+    assert len(embed.fields) == 2
+    assert embed.fields[0].name == "⭐ Primeiro"
+    assert "resumo 1 traduzido" in embed.fields[0].value
+    assert "https://x.com/1" in embed.fields[0].value
+    assert "Fonte: X" in embed.fields[0].value
+    assert embed.fields[1].name == "Segundo"
+    assert not embed.fields[1].name.startswith("⭐")
 
 
-def test_header_de_categoria_usa_a_cor_e_o_label_da_categoria():
-    header = build_category_header_embed(_CATEGORIA_TESTE)
-    assert header.author.name == "🎌 Geek & Anime"
-    assert header.color == discord.Color.blue()
+def test_categoria_embed_sem_imagem_nao_quebra():
+    itens = [{"title": "Sem imagem", "summary": "resumo", "link": "https://x.com", "source": "X", "image": None}]
+    assert build_category_embed(_CATEGORIA_TESTE, itens).image.url is None
+
+
+def test_categoria_embed_lista_vazia_nao_quebra():
+    embed = build_category_embed(_CATEGORIA_TESTE, [])
+    assert embed.fields == []
+    assert embed.image.url is None

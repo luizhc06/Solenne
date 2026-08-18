@@ -565,38 +565,32 @@ async def _summarize_category(items: list[dict], interest_hint: str = "", foco: 
     return items[:NEWS_MAX_ITEMS_PER_CATEGORY]
 
 
-def build_item_embed(category: dict, item: dict, destaque: bool = False) -> discord.Embed:
-    """`destaque=True` pro primeiro item de cada categoria (achado do usuario 18/08/2026:
-    melhorar a aparencia do digest) - imagem GRANDE (set_image) em vez de miniatura no
-    canto (set_thumbnail), pra dar hierarquia visual real entre a materia mais
-    importante da categoria e o resto, em vez de todos os cards saírem identicos."""
-    titulo = item.get("title_pt") or item["title"]
-    resumo = item.get("summary_pt") or item["summary"] or "(sem resumo disponivel)"
-    embed = discord.Embed(
+def build_category_embed(category: dict, curated: list[dict]) -> discord.Embed:
+    """UM embed por categoria, com cada noticia como field (18/08/2026, 2a rodada de
+    ajuste de aparencia: a versao anterior mandava 1 embed de cabecalho + 1 embed por
+    noticia na mesma mensagem - no Discord mobile isso virava uma parede de caixas
+    repetidas (borda colorida + padding + rodape "Fonte" em cada uma), alem de imagem
+    de miniatura ficando espremida do lado do texto em telas estreitas. Reportado pelo
+    usuario com print do app: "muito ruim de visualizar, imagens bugadas, texto paia".
+
+    Consolidar em 1 embed por categoria reduz pra 1 caixa colorida por categoria (em
+    vez de ate 5), e usa só a imagem do destaque como imagem grande do embed inteiro -
+    sem miniatura por item, que era o ponto mais estreito/espremido no celular."""
+    embed = discord.Embed(title=category["label"], color=category["color"])
+    if curated and curated[0].get("image"):
+        embed.set_image(url=curated[0]["image"])
+    for i, item in enumerate(curated):
+        titulo = item.get("title_pt") or item["title"]
+        resumo = item.get("summary_pt") or item["summary"] or "(sem resumo disponivel)"
+        estrela = "⭐ " if i == 0 else ""
         # Corta na palavra em vez de no caractere: o corte seco em 250/400 deixava
         # titulo terminando no meio de uma palavra quando o fallback sem traducao entrava.
-        title=("⭐ " if destaque else "") + truncate_words(titulo, NEWS_TITLE_MAX_CHARS),
-        description=truncate_words(resumo, NEWS_SUMMARY_MAX_CHARS),
-        url=item["link"],
-        color=category["color"],
-    )
-    if item.get("image"):
-        if destaque:
-            embed.set_image(url=item["image"])
-        else:
-            embed.set_thumbnail(url=item["image"])
-    embed.set_footer(text=f"Fonte: {item['source']}")
-    return embed
-
-
-def build_category_header_embed(category: dict) -> discord.Embed:
-    """Separador de categoria como embed pequeno, na cor da categoria - substitui o
-    antigo `# {label}` em texto markdown solto (achado do usuario 18/08/2026: melhorar
-    a aparencia). Fica no MESMO bloco visual dos cards (mesma mensagem do Discord, ver
-    post_news_digest) em vez de ser uma mensagem de texto crua quebrando o visual entre
-    os embeds."""
-    embed = discord.Embed(color=category["color"])
-    embed.set_author(name=category["label"])
+        nome = estrela + truncate_words(titulo, NEWS_TITLE_MAX_CHARS)
+        valor = (
+            f"{truncate_words(resumo, NEWS_SUMMARY_MAX_CHARS)}\n"
+            f"[Ler mais]({item['link']}) · *Fonte: {item['source']}*"
+        )
+        embed.add_field(name=nome, value=valor, inline=False)
     return embed
 
 
@@ -742,8 +736,7 @@ async def build_news_digest(interactive: bool = False):
             sem_relevancia.append(category["label"])
             continue
 
-        embeds = [build_item_embed(category, item, destaque=(i == 0)) for i, item in enumerate(curated)]
-        sections.append((category, curated, embeds))
+        sections.append((category, curated, [build_category_embed(category, curated)]))
         await loop.run_in_executor(None, mark_news_posted, [it["link"] for it in curated])
     return sections, skipped, sem_relevancia
 
@@ -784,14 +777,10 @@ async def post_news_digest(channel: discord.TextChannel, interactive: bool = Fal
         content=None, embed=header_embed
     )
     for category, _curated, embeds in sections:
-        # Cabecalho de categoria vira embed na mesma mensagem dos cards (achado do
-        # usuario 18/08/2026: melhorar a aparencia) - ate 10 embeds cabem numa mensagem
-        # do Discord, e o teto daqui e 1 + NEWS_MAX_ITEMS_PER_CATEGORY (5), bem dentro.
-        todos_embeds = [build_category_header_embed(category)] + embeds
         try:
-            await channel.send(embeds=todos_embeds, view=FeedbackView(category["label"]))
+            await channel.send(embed=embeds[0], view=FeedbackView(category["label"]))
         except discord.HTTPException:
-            log.exception("Erro ao enviar embeds da categoria %s", category["label"])
+            log.exception("Erro ao enviar embed da categoria %s", category["label"])
             await channel.send("(deu erro ao mostrar essa categoria, pulando pra proxima)")
 
     # Diz o que faltou em vez de simplesmente omitir - categoria sumindo em silencio
