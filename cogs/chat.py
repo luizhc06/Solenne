@@ -10,6 +10,7 @@ from discord.ext import commands
 from config import OWNER_USER_ID, NEWS_TIMEZONE, DIAS_SEMANA
 from db import load_recent_history, save_message, get_user_summary, load_user_messages
 from ai_client import ai_gate, answer_with_tools, _complete, friendly_ai_error, THINK_LOW
+from cogs.search import PESQUISAR_WEB_DESCRICAO
 from user_profile import schedule_profile_update
 from notify import notify_owner_text
 from utils import (
@@ -26,7 +27,7 @@ from views import FeedbackView
 
 log = logging.getLogger("hermes-bot")
 
-SYSTEM_PROMPT = """Voce e Solenne, a IA pessoal do Rizu. Fale em pt-BR, sempre no feminino ao se referir a si mesma.
+SYSTEM_PROMPT = f"""Voce e Solenne, a IA pessoal do Rizu. Fale em pt-BR, sempre no feminino ao se referir a si mesma.
 
 Contexto importante: voce esta num canal de Discord com varias pessoas diferentes
 conversando entre si, nao so com voce. O historico mostra quem disse cada coisa
@@ -87,9 +88,7 @@ Tom e formato (regras duras):
   de um jeito engracado em vez de seco).
 
 FERRAMENTAS QUE VOCE USA SOZINHA (nao precisa que ninguem peca comando):
-- `pesquisar_web` - busca na web. Use quando a resposta depende de fato recente, preco, lancamento,
-  resultado, noticia, ou quando voce simplesmente nao tem certeza. Nao use pra conhecimento estavel
-  (conceito, definicao, como algo funciona) nem pra conversa pessoal - nesses casos responda direto.
+- `pesquisar_web` - {PESQUISAR_WEB_DESCRICAO}
 - `consultar_clima` - clima, previsao e alerta oficial do INMET. Use SEMPRE que perguntarem sobre
   tempo, chuva, temperatura, frio ou calor. Nunca responda clima de cabeca.
 - `resumir_link` - abre uma URL que ja apareceu na conversa e le o conteudo real dela.

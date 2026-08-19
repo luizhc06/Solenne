@@ -1,4 +1,14 @@
 from cogs.chat import SYSTEM_PROMPT
+from cogs.search import PESQUISAR_WEB_DESCRICAO
+
+
+def test_prompt_reusa_descricao_da_tool_pesquisar_web_sem_duplicar():
+    """Regressao (auditoria): a explicacao de quando usar pesquisar_web tinha duas
+    versoes escritas a mao - uma no SYSTEM_PROMPT e outra em PESQUISAR_WEB_DESCRICAO
+    (a que a API de fato recebe, via tools.register em cogs/search.py) - e ja tinham
+    divergido uma da outra. O SYSTEM_PROMPT agora reusa PESQUISAR_WEB_DESCRICAO em vez
+    de reescreve-la, entao as duas nunca mais podem sair diferentes."""
+    assert PESQUISAR_WEB_DESCRICAO in SYSTEM_PROMPT
 
 
 def test_prompt_lista_moderacao_automatica_como_funcionalidade_real():
