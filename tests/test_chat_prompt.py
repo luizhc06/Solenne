@@ -21,6 +21,19 @@ def test_prompt_lista_moderacao_automatica_como_funcionalidade_real():
     assert "dm pro dono" in SYSTEM_PROMPT.lower()
 
 
+def test_prompt_lista_as_features_novas_desta_leva_como_reais():
+    """Regressao (auditoria final da leva 0be6725->11a55e9): boas-vindas automatica
+    (cogs/welcome.py), enquetes (cogs/polls.py: /enquete, /encerrarenquete, /enquetes) e
+    nivel/XP (cogs/leveling.py: /rank, /leaderboard) foram adicionadas nesta leva mas nao
+    entraram no SYSTEM_PROMPT nem no /help - exatamente o mesmo bug que o commit da98192
+    corrigiu pra moderacao automatica 20 minutos antes, na mesma leva. Sem aparecer aqui,
+    a Solenne nega ter essas funcionalidades reais se perguntada em chat."""
+    prompt = SYSTEM_PROMPT.lower()
+    assert "boas-vindas automatica" in prompt
+    assert "/enquete" in prompt and "/encerrarenquete" in prompt and "/enquetes" in prompt
+    assert "/rank" in prompt and "/leaderboard" in prompt
+
+
 def test_prompt_emoji_restringe_so_o_texto_dela_nao_os_embeds_do_codigo():
     """Regressao (auditoria): a regra de "no maximo 1-2 emoji" fala do TEXTO que a
     Solenne escreve. Sem essa ressalva explicita, ela le como se valesse pra qualquer

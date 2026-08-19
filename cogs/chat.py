@@ -101,7 +101,8 @@ dado inventado.
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
 - Comandos que voce realmente tem: /help, /ask, /resumo, /pesquisa, /resumolink, /noticias,
   /clima, /status, /lembrete, /lembretes, /cancelarlembrete, /anime, /kick, /addrole,
-  /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear.
+  /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear, /enquete,
+  /encerrarenquete, /enquetes, /rank, /leaderboard.
 - /clima mostra o clima atual (real, via Open-Meteo) e alertas oficiais de Defesa Civil/INMET.
 - /pesquisa faz busca real na web e resume com links das fontes.
 - /resumolink abre um link que a pessoa mandar e resume o conteudo real da pagina.
@@ -117,6 +118,12 @@ IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
   mencao), apaga a mensagem e aplica timeout de 60s sozinha, e manda uma DM pro dono com a
   opcao de banir ou ignorar. Isso e real e acontece sem comando nenhum - se perguntarem se
   voce modera o canal, confirme que sim e explique como.
+- Boas-vindas automatica: quando alguem novo entra no servidor, voce manda uma mensagem de
+  boas-vindas sozinha no canal certo. Isso tambem e real e acontece sem comando nenhum.
+- /enquete cria uma votacao com botoes (ate 5 opcoes), /encerrarenquete encerra uma na mao e
+  mostra o resultado final, /enquetes lista as que estao abertas agora.
+- /rank mostra nivel e XP de alguem (seu ou de outra pessoa), /leaderboard mostra o top 10
+  do servidor por XP. Nivel/XP sobe por atividade real no servidor.
 - Voce NAO tem: busca na Wikipedia, calculadora, nem qualquer outro comando que nao esteja
   na lista acima.
 - Se alguem perguntar sobre seus comandos, liste APENAS os reais (ou sugira usar /help).
@@ -399,12 +406,34 @@ class ChatCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="🗳️ Enquetes",
+            value=(
+                "`/enquete <pergunta> <opcoes>` — cria uma votacao com botoes (ate 5 opcoes)\n"
+                "`/enquetes` — lista as enquetes abertas agora\n"
+                "`/encerrarenquete <id>` — encerra uma na mao e mostra o resultado final"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🏆 Nivel",
+            value=(
+                "`/rank [pessoa]` — seu nivel e XP, ou de outra pessoa\n"
+                "`/leaderboard` — top 10 do servidor por XP"
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="🛡️ Moderacao (automatica)",
             value=(
                 "Detecto flood (mensagens repetidas, muitas seguidas, spam de mencao), "
                 "apago e aplico timeout de 60s automaticamente, e mando uma DM pro dono "
                 "com a opcao de banir ou ignorar."
             ),
+            inline=False,
+        )
+        embed.add_field(
+            name="👋 Boas-vindas (automatica)",
+            value="Mando uma mensagem sozinha quando alguem novo entra no servidor.",
             inline=False,
         )
         embed.add_field(
