@@ -1,12 +1,32 @@
-from datetime import datetime, timedelta
+import asyncio
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from cogs.reminders import parse_when
+import db
+from cogs.reminders import REMINDER_MAX_PER_USER, RemindersCog, parse_when
 
 TZ = ZoneInfo("America/Sao_Paulo")
 NOW = datetime(2026, 7, 28, 14, 30, tzinfo=TZ)  # terca-feira
+
+
+@pytest.fixture
+def isolated_db(tmp_path, monkeypatch):
+    """Aponta o modulo db pra um sqlite descartavel e cria o schema nele."""
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    db.init_db()
+    return db_path
+
+
+def _fake_interaction(user_id):
+    interaction = MagicMock()
+    interaction.user.id = user_id
+    interaction.channel_id = 555
+    interaction.response.send_message = AsyncMock()
+    return interaction
 
 
 @pytest.mark.parametrize(
@@ -82,3 +102,53 @@ def test_parse_rejects_plain_text():
 def test_parse_rejects_impossible_clock():
     assert parse_when("99:99", NOW) is None
     assert parse_when("32/13 10:00", NOW) is None
+
+
+def test_cancelarlembrete_refuses_to_cancel_another_users_reminder(isolated_db):
+    """Integracao de ponta a ponta do comando /cancelarlembrete: o id do lembrete e
+    sequencial e visivel em /lembretes, entao sem o guard de posse em delete_reminder
+    qualquer pessoa cancelaria o lembrete de outra so adivinhando o numero."""
+    due_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+    reminder_id = db.add_reminder(user_id=111, channel_id=1, text="lembrete da vitima", due_at=due_at)
+
+    attacker = _fake_interaction(user_id=999)
+    asyncio.run(RemindersCog.cancelarlembrete.callback(object(), attacker, id=reminder_id))
+
+    attacker.response.send_message.assert_awaited_once()
+    sent_text = attacker.response.send_message.call_args.args[0]
+    assert "Nao achei" in sent_text
+
+    # O lembrete da vitima sobrevive intacto.
+    pending = db.list_reminders(user_id=111)
+    assert len(pending) == 1
+    assert pending[0]["id"] == reminder_id
+
+
+def test_cancelarlembrete_lets_owner_cancel_their_own_reminder(isolated_db):
+    due_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+    reminder_id = db.add_reminder(user_id=111, channel_id=1, text="meu lembrete", due_at=due_at)
+
+    owner = _fake_interaction(user_id=111)
+    asyncio.run(RemindersCog.cancelarlembrete.callback(object(), owner, id=reminder_id))
+
+    owner.response.send_message.assert_awaited_once()
+    sent_text = owner.response.send_message.call_args.args[0]
+    assert "cancelado" in sent_text
+    assert db.list_reminders(user_id=111) == []
+
+
+def test_lembrete_command_blocks_after_reaching_the_per_user_limit(isolated_db):
+    due_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+    for _ in range(REMINDER_MAX_PER_USER):
+        db.add_reminder(user_id=42, channel_id=1, text="ja existente", due_at=due_at)
+
+    interaction = _fake_interaction(user_id=42)
+    asyncio.run(
+        RemindersCog.lembrete.callback(object(), interaction, quando="30m", oque="mais um")
+    )
+
+    interaction.response.send_message.assert_awaited_once()
+    sent_text = interaction.response.send_message.call_args.args[0]
+    assert "limite" in sent_text
+    # Nao deve ter criado um lembrete a mais alem do limite.
+    assert len(db.list_reminders(user_id=42)) == REMINDER_MAX_PER_USER
