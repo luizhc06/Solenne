@@ -18,6 +18,7 @@ EXTENSIONS = [
     "cogs.reminders",
     "cogs.anime",
     "cogs.welcome",
+    "cogs.polls",
 ]
 
 

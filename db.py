@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import sqlite3
 import logging
@@ -101,6 +102,35 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS polls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER,
+                creator_id INTEGER NOT NULL,
+                question TEXT NOT NULL,
+                options TEXT NOT NULL,
+                anonymous INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                closes_at TEXT,
+                closed INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS poll_votes (
+                poll_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                option_index INTEGER NOT NULL,
+                voted_at TEXT NOT NULL,
+                PRIMARY KEY (poll_id, user_id)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes(poll_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_polls_open ON polls(closed, closes_at)")
 
 
 def save_message(channel_id: int, role: str, author_name: str | None, content: str):
@@ -339,3 +369,118 @@ def backup_database_sync():
             log.exception("Erro ao limpar backup antigo %s", fname)
 
     log.info("Backup do banco criado: %s", dest_path)
+
+
+def _poll_row_to_dict(row) -> dict:
+    (
+        poll_id, channel_id, message_id, creator_id, question, options_json,
+        anonymous, created_at, closes_at, closed,
+    ) = row
+    return {
+        "id": poll_id,
+        "channel_id": channel_id,
+        "message_id": message_id,
+        "creator_id": creator_id,
+        "question": question,
+        "options": json.loads(options_json),
+        "anonymous": bool(anonymous),
+        "created_at": created_at,
+        "closes_at": datetime.fromisoformat(closes_at) if closes_at else None,
+        "closed": bool(closed),
+    }
+
+
+_POLL_COLUMNS = (
+    "id, channel_id, message_id, creator_id, question, options, "
+    "anonymous, created_at, closes_at, closed"
+)
+
+
+def create_poll(
+    channel_id: int,
+    creator_id: int,
+    question: str,
+    options: list[str],
+    anonymous: bool,
+    closes_at: datetime | None,
+) -> int:
+    with db_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO polls (channel_id, creator_id, question, options, anonymous, created_at, closes_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                channel_id,
+                creator_id,
+                question,
+                json.dumps(options),
+                int(anonymous),
+                datetime.now(timezone.utc).isoformat(),
+                closes_at.astimezone(timezone.utc).isoformat() if closes_at else None,
+            ),
+        )
+        return cur.lastrowid
+
+
+def set_poll_message_id(poll_id: int, message_id: int):
+    with db_conn() as conn:
+        conn.execute("UPDATE polls SET message_id = ? WHERE id = ?", (message_id, poll_id))
+
+
+def get_poll(poll_id: int) -> dict | None:
+    with db_conn() as conn:
+        row = conn.execute(
+            f"SELECT {_POLL_COLUMNS} FROM polls WHERE id = ?", (poll_id,)
+        ).fetchone()
+    return _poll_row_to_dict(row) if row else None
+
+
+def get_open_polls() -> list[dict]:
+    """Todas as enquetes ainda nao encerradas - usado no boot pra reregistrar as
+    PollView (custom_id fixo) via bot.add_view, senao os botoes ficam mudos depois de
+    um restart. Devolve mesmo as com prazo ja vencido: o check_polls_task fecha essas
+    sozinho poucos segundos depois de o bot subir, mas ate la os botoes ainda devem
+    responder normalmente."""
+    with db_conn() as conn:
+        rows = conn.execute(f"SELECT {_POLL_COLUMNS} FROM polls WHERE closed = 0").fetchall()
+    return [_poll_row_to_dict(r) for r in rows]
+
+
+def get_expired_polls() -> list[dict]:
+    now = datetime.now(timezone.utc).isoformat()
+    with db_conn() as conn:
+        rows = conn.execute(
+            f"SELECT {_POLL_COLUMNS} FROM polls "
+            "WHERE closed = 0 AND closes_at IS NOT NULL AND closes_at <= ?",
+            (now,),
+        ).fetchall()
+    return [_poll_row_to_dict(r) for r in rows]
+
+
+def close_poll(poll_id: int):
+    with db_conn() as conn:
+        conn.execute("UPDATE polls SET closed = 1 WHERE id = ?", (poll_id,))
+
+
+def cast_vote(poll_id: int, user_id: int, option_index: int) -> bool:
+    """Registra o voto (UPSERT - troca o voto anterior se ja existia). Devolve True se
+    era um voto novo, False se so trocou de opcao."""
+    with db_conn() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM poll_votes WHERE poll_id = ? AND user_id = ?", (poll_id, user_id)
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO poll_votes (poll_id, user_id, option_index, voted_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(poll_id, user_id) DO UPDATE SET "
+            "option_index = excluded.option_index, voted_at = excluded.voted_at",
+            (poll_id, user_id, option_index, datetime.now(timezone.utc).isoformat()),
+        )
+    return existing is None
+
+
+def get_poll_results(poll_id: int) -> dict[int, int]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT option_index, COUNT(*) FROM poll_votes WHERE poll_id = ? GROUP BY option_index",
+            (poll_id,),
+        ).fetchall()
+    return {r[0]: r[1] for r in rows}
