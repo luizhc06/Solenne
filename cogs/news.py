@@ -617,7 +617,9 @@ Regras duras da abertura:
 - Uma ou duas frases curtas, no maximo 200 caracteres, terminando em ponto final.
 - Comente o assunto de verdade (o que voce achou dele) em vez de anunciar que existe um resumo.
 - Se o destaque for tragedia (morte, violencia, desastre), largue o humor e seja sobria.
-- Nao inclua data, nao use as palavras "resumo" ou "noticias", nao use emoji.
+- Nao inclua data, nao use as palavras "resumo" ou "noticias", nao use emoji (essa regra e
+  so pra sua frase - o campo "Destaque do dia" que o codigo monta depois usa icone de UI
+  normalmente, ver comentario em post_news_digest).
 
 Responda SOMENTE com JSON valido, com os campos NESTA ordem - escolha o destaque ANTES de escrever:
 {{"destaque_i": 0, "eco": "as 5 primeiras palavras do titulo do destaque", "abertura": "..."}}"""
@@ -767,6 +769,9 @@ async def post_news_digest(channel: discord.TextChannel, interactive: bool = Fal
     header_embed = discord.Embed(description=f"**{intro}**", color=discord.Color.purple())
     header_embed.set_author(name=f"Resumo de Notícias — {today}", icon_url=channel.guild.me.display_avatar.url)
     if destaque:
+        # O emoji aqui e icone de UI do embed, nao "fala" da Solenne - a regra de "nao use
+        # emoji" do NEWS_INTRO_PROMPT vale so pra frase que ela escreve (`intro` acima),
+        # igual ao restante dos embeds do bot (/help, cards de categoria). Ver SYSTEM_PROMPT.
         header_embed.add_field(
             name="📌 Destaque do dia",
             value=f"[{truncate_words(titulo_exibido(destaque), NEWS_TITLE_MAX_CHARS)}]({destaque['link']})",

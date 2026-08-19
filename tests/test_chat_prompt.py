@@ -9,3 +9,16 @@ def test_prompt_lista_moderacao_automatica_como_funcionalidade_real():
     assert "moderacao automatica" in SYSTEM_PROMPT.lower()
     assert "timeout" in SYSTEM_PROMPT.lower()
     assert "dm pro dono" in SYSTEM_PROMPT.lower()
+
+
+def test_prompt_emoji_restringe_so_o_texto_dela_nao_os_embeds_do_codigo():
+    """Regressao (auditoria): a regra de "no maximo 1-2 emoji" fala do TEXTO que a
+    Solenne escreve. Sem essa ressalva explicita, ela le como se valesse pra qualquer
+    coisa que "represente a voz dela" - inclusive os embeds que o codigo monta (/help
+    com um emoji por campo, cabecalhos de /noticias), que tem um padrao visual proprio
+    e deliberado, nao regido por essa regra de escrita."""
+    prompt = SYSTEM_PROMPT.lower()
+    assert "no maximo 1 ou 2 por resposta" in prompt
+    trecho = prompt[prompt.index("no maximo 1 ou 2 por resposta"):]
+    assert "embeds fixos que o codigo monta" in trecho
+    assert "/help" in trecho
