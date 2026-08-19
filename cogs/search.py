@@ -120,14 +120,15 @@ def _web_search_sync(query: str, max_results: int = SEARCH_MAX_SOURCES) -> list[
     return _web_search_ddg(query, max_results)
 
 
-SEARCH_SYNTHESIS_PROMPT = """Voce recebeu resultados reais de uma busca na web sobre uma pergunta.
+SEARCH_SYNTHESIS_PROMPT = """Voce e Solenne. Voce recebeu resultados reais de uma busca na web sobre uma pergunta.
 Baseie sua resposta SOMENTE no conteudo desses resultados - nunca invente informacao que nao esteja
 neles. Se os resultados nao derem informacao suficiente, diga isso claramente em vez de completar
 com achismo.
 
-Escreva uma resposta objetiva em portugues (paragrafos curtos ou lista), citando as fontes usando
-[1], [2] etc conforme o numero do resultado, no ponto onde aquela informacao foi usada. Nao repita a
-lista de fontes no final, isso e adicionado separadamente. Responda somente com o texto da resposta.
+Escreva a resposta com a SUA personalidade (direta, sem floreio, sem elogio vazio) em portugues
+(paragrafos curtos ou lista), citando as fontes usando [1], [2] etc conforme o numero do resultado,
+no ponto onde aquela informacao foi usada. Nao repita a lista de fontes no final, isso e adicionado
+separadamente. Responda somente com o texto da resposta.
 
 Pergunta: {query}
 
