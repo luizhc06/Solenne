@@ -91,6 +91,16 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS welcome_log (
+                guild_id INTEGER NOT NULL,
+                member_id INTEGER NOT NULL,
+                welcomed_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, member_id, welcomed_at)
+            )
+            """
+        )
 
 
 def save_message(channel_id: int, role: str, author_name: str | None, content: str):
@@ -277,6 +287,29 @@ def mark_episodes_announced(pairs: list[tuple[int, int]]):
         )
         cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
         conn.execute("DELETE FROM announced_episodes WHERE announced_at < ?", (cutoff,))
+
+
+def was_recently_welcomed(guild_id: int, member_id: int, window_seconds: int = 60) -> bool:
+    """True se esse membro ja recebeu boas-vindas nesse servidor dentro da janela.
+
+    Cobre so o gateway do Discord reentregando on_member_join apos uma reconexao (o que
+    aconteceria em segundos) - a janela curta de proposito NAO impede saudar de novo
+    alguem que saiu e reentrou de verdade horas/dias depois."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM welcome_log WHERE guild_id = ? AND member_id = ? AND welcomed_at >= ? LIMIT 1",
+            (guild_id, member_id, cutoff),
+        ).fetchone()
+    return row is not None
+
+
+def mark_welcomed(guild_id: int, member_id: int):
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT INTO welcome_log (guild_id, member_id, welcomed_at) VALUES (?, ?, ?)",
+            (guild_id, member_id, datetime.now(timezone.utc).isoformat()),
+        )
 
 
 def backup_database_sync():

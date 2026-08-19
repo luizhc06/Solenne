@@ -17,6 +17,7 @@ EXTENSIONS = [
     "cogs.linksummary",
     "cogs.reminders",
     "cogs.anime",
+    "cogs.welcome",
 ]
 
 

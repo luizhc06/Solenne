@@ -23,6 +23,7 @@ class AppConfig:
     anilist_username: str = "Rizuw"
     ai_concurrency_limit: int = 4
     tavily_api_key: str = ""
+    welcome_channel_id: int | None = None
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -58,6 +59,12 @@ class AppConfig:
             # Feature flag da troca de fonte de busca (18/08/2026, ver cogs/search.py):
             # vazio = continua 100% no scraping do DuckDuckGo, como sempre foi.
             tavily_api_key=os.environ.get("TAVILY_API_KEY", ""),
+            # Canal fixo de boas-vindas (cogs/welcome.py). Vazio/ausente = cai pro
+            # system_channel do proprio Discord em tempo de execucao, entao nao ha
+            # default aqui - so None mesmo.
+            welcome_channel_id=(
+                int(os.environ["WELCOME_CHANNEL_ID"]) if os.environ.get("WELCOME_CHANNEL_ID") else None
+            ),
         )
 
 try:
@@ -77,6 +84,7 @@ HUMANIZE_PASS = _cfg.humanize_pass
 ANILIST_USERNAME = _cfg.anilist_username
 AI_CONCURRENCY_LIMIT = _cfg.ai_concurrency_limit
 TAVILY_API_KEY = _cfg.tavily_api_key
+WELCOME_CHANNEL_ID = _cfg.welcome_channel_id
 HISTORY_WINDOW = 20
 
 # Recomendacao oficial da NVIDIA pro Nemotron 3 Super: temperature 1.0 e top_p 0.95
