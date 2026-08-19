@@ -1,10 +1,21 @@
 import asyncio
 import logging
+from collections import defaultdict
 
 from db import get_user_summary, save_user_summary
 from ai_client import _complete, ai_gate
 
 log = logging.getLogger("hermes-bot")
+
+# update_profile() le o resumo atual, espera uma chamada de IA (que pode levar
+# varios segundos) e so entao grava - sem lock, duas tasks para o MESMO user_id
+# (ex: uma mensagem de chat e um clique no botao de feedback quase juntos, ver
+# cogs/chat.py e views.py) podiam ler o mesmo `current` desatualizado e a que
+# terminasse por ultimo sobrescrevia a outra silenciosamente (lost update,
+# achado do conselho de agentes, 19/08/2026). Um lock por user_id serializa
+# leitura+IA+escrita: a segunda task so comeca a ler depois que a primeira
+# terminou de gravar, entao ela ve o resumo ja atualizado como `current`.
+_profile_locks: "defaultdict[int, asyncio.Lock]" = defaultdict(asyncio.Lock)
 
 PROFILE_UPDATE_PROMPT = """Voce mantem um resumo curto (no maximo 5 linhas) sobre cada pessoa
 que conversa com voce: fatos uteis e reais, preferencias, interesses, contexto recorrente,
@@ -30,17 +41,18 @@ async def update_profile(user_id: int, name: str, message: str):
     cota da API que o chat oficial respeita via fila. background() e o modo certo aqui -
     e trabalho de fundo de verdade, sem ninguem esperando na tela por ele."""
     loop = asyncio.get_event_loop()
-    current = await loop.run_in_executor(None, get_user_summary, user_id)
-    prompt = PROFILE_UPDATE_PROMPT.format(name=name, current_summary=current or "(vazio ainda)", message=message)
-    try:
-        async with ai_gate.background():
-            new_summary = await _complete([{"role": "user", "content": prompt}], temperature=0.3)
-    except Exception:
-        log.exception("Erro ao atualizar perfil de %s", name)
-        return
-    new_summary = new_summary.strip()
-    if new_summary and new_summary != current:
-        await loop.run_in_executor(None, save_user_summary, user_id, name, new_summary)
+    async with _profile_locks[user_id]:
+        current = await loop.run_in_executor(None, get_user_summary, user_id)
+        prompt = PROFILE_UPDATE_PROMPT.format(name=name, current_summary=current or "(vazio ainda)", message=message)
+        try:
+            async with ai_gate.background():
+                new_summary = await _complete([{"role": "user", "content": prompt}], temperature=0.3)
+        except Exception:
+            log.exception("Erro ao atualizar perfil de %s", name)
+            return
+        new_summary = new_summary.strip()
+        if new_summary and new_summary != current:
+            await loop.run_in_executor(None, save_user_summary, user_id, name, new_summary)
 
 
 # asyncio so segura uma referencia FRACA a uma task criada com create_task() - se
