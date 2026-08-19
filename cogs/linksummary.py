@@ -36,6 +36,27 @@ class UnsafeURLError(Exception):
     pass
 
 
+def _resolve_safe_ip(hostname: str) -> str:
+    """Resolve o hostname, barra IP privado/loopback/link-local/reservado e devolve
+    o IP escolhido, pra quem for conectar de verdade pinar nesse mesmo IP.
+
+    Devolver o IP (em vez de so validar e descartar) fecha a janela de TOCTOU: se a
+    checagem so validasse o hostname e a conexao real resolvesse o DNS de novo depois,
+    um atacante controlando o DNS poderia responder um IP publico na hora da checagem
+    e um IP interno na hora da conexao.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        raise UnsafeURLError("Nao consegui resolver o endereco desse link.")
+
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise UnsafeURLError("Esse endereco e interno, nao vou abrir.")
+    return infos[0][4][0]
+
+
 def ensure_public_http_url(url: str):
     """Recusa qualquer coisa que nao seja http(s) para um IP publico.
 
@@ -50,15 +71,7 @@ def ensure_public_http_url(url: str):
     if not parsed.hostname:
         raise UnsafeURLError("Esse link nao tem um endereco valido.")
 
-    try:
-        infos = socket.getaddrinfo(parsed.hostname, None)
-    except socket.gaierror:
-        raise UnsafeURLError("Nao consegui resolver o endereco desse link.")
-
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            raise UnsafeURLError("Esse endereco e interno, nao vou abrir.")
+    _resolve_safe_ip(parsed.hostname)
 
 
 def extract_text(raw_html: str) -> tuple[str, str]:
@@ -71,30 +84,54 @@ def extract_text(raw_html: str) -> tuple[str, str]:
     return title, WHITESPACE_RE.sub(" ", text).strip()
 
 
+MAX_REDIRECTS = 5
+
+
 def _fetch_page_sync(url: str) -> tuple[str, str]:
-    ensure_public_http_url(url)
-    with httpx.stream(
-        "GET",
-        url,
-        timeout=FETCH_TIMEOUT_SECONDS,
-        follow_redirects=True,
-        headers={"User-Agent": FETCH_USER_AGENT},
-    ) as resp:
-        resp.raise_for_status()
-        content_type = resp.headers.get("content-type", "")
-        if "html" not in content_type and "text" not in content_type:
-            raise UnsafeURLError(f"Esse link nao e uma pagina de texto (e {content_type or 'desconhecido'}).")
+    # follow_redirects=True do httpx nao revalida cada hop: um dominio publico
+    # controlado por um atacante pode responder 302 pra um IP interno (ex.:
+    # 169.254.169.254) e o httpx seguiria sem checar nada. Por isso o redirect e
+    # seguido manualmente aqui, validando e pinando o IP a cada hop.
+    for _ in range(MAX_REDIRECTS + 1):
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise UnsafeURLError("Esse link nao tem um endereco valido.")
 
-        chunks = []
-        total = 0
-        for chunk in resp.iter_bytes():
-            chunks.append(chunk)
-            total += len(chunk)
-            if total >= FETCH_MAX_BYTES:
-                break
-        raw = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+        ip = _resolve_safe_ip(parsed.hostname)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        pinned_host = f"[{ip}]" if ":" in ip else ip
+        pinned_netloc = f"{pinned_host}:{port}"
+        pinned_url = urllib.parse.urlunparse(parsed._replace(netloc=pinned_netloc))
 
-    return extract_text(raw)
+        with httpx.stream(
+            "GET",
+            pinned_url,
+            timeout=FETCH_TIMEOUT_SECONDS,
+            follow_redirects=False,
+            headers={"User-Agent": FETCH_USER_AGENT, "Host": parsed.hostname},
+            extensions={"sni_hostname": parsed.hostname},
+        ) as resp:
+            if resp.has_redirect_location:
+                url = urllib.parse.urljoin(url, resp.headers["location"])
+                continue
+
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+            if "html" not in content_type and "text" not in content_type:
+                raise UnsafeURLError(f"Esse link nao e uma pagina de texto (e {content_type or 'desconhecido'}).")
+
+            chunks = []
+            total = 0
+            for chunk in resp.iter_bytes():
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= FETCH_MAX_BYTES:
+                    break
+            raw = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+
+        return extract_text(raw)
+
+    raise UnsafeURLError("Esse link tem redirecionamentos demais.")
 
 
 LINK_SUMMARY_PROMPT = """Voce recebeu o texto extraido de uma pagina da web. Resuma em portugues,
