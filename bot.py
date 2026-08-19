@@ -19,6 +19,7 @@ EXTENSIONS = [
     "cogs.anime",
     "cogs.welcome",
     "cogs.polls",
+    "cogs.leveling",
 ]
 
 

@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from config import DB_PATH
+from leveling_utils import level_for_xp
 
 log = logging.getLogger("hermes-bot")
 
@@ -131,6 +132,21 @@ def init_db():
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes(poll_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_polls_open ON polls(closed, closes_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_levels (
+                user_id INTEGER PRIMARY KEY,
+                display_name TEXT,
+                xp INTEGER NOT NULL DEFAULT 0,
+                level INTEGER NOT NULL DEFAULT 0,
+                messages_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT
+            )
+            """
+        )
+        # Acelera tanto /leaderboard (ORDER BY xp DESC LIMIT 10) quanto o calculo de
+        # posicao no /rank (COUNT(*) WHERE xp > ?).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_user_levels_xp ON user_levels(xp DESC)")
 
 
 def save_message(channel_id: int, role: str, author_name: str | None, content: str):
@@ -484,3 +500,73 @@ def get_poll_results(poll_id: int) -> dict[int, int]:
             (poll_id,),
         ).fetchall()
     return {r[0]: r[1] for r in rows}
+
+
+def add_xp(user_id: int, display_name: str, amount: int) -> tuple[bool, int]:
+    """Concede XP a um usuario (UPSERT) e recalcula o nivel na mesma transacao, pra nao
+    ter race entre ler o nivel antigo e gravar o novo. Devolve (subiu_de_nivel, nivel_novo).
+
+    O nivel novo e calculado aqui (em Python, via level_for_xp) e nao em SQL porque a
+    formula e uma curva (raiz quadrada) que o SQLite nao expressa direito em uma
+    expressao simples - por isso o SELECT do XP atual antes do INSERT."""
+    with db_conn() as conn:
+        row = conn.execute("SELECT xp, level FROM user_levels WHERE user_id = ?", (user_id,)).fetchone()
+        old_xp, old_level = (row[0], row[1]) if row else (0, 0)
+        new_xp = old_xp + amount
+        new_level = level_for_xp(new_xp)
+        conn.execute(
+            "INSERT INTO user_levels (user_id, display_name, xp, level, messages_count, updated_at) "
+            "VALUES (?, ?, ?, ?, 1, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "display_name = excluded.display_name, "
+            "xp = excluded.xp, "
+            "level = excluded.level, "
+            "messages_count = messages_count + 1, "
+            "updated_at = excluded.updated_at",
+            (user_id, display_name, new_xp, new_level, datetime.now(timezone.utc).isoformat()),
+        )
+    return new_level > old_level, new_level
+
+
+def get_user_level(user_id: int) -> dict | None:
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id, display_name, xp, level, messages_count FROM user_levels WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "user_id": row[0],
+        "display_name": row[1],
+        "xp": row[2],
+        "level": row[3],
+        "messages_count": row[4],
+    }
+
+
+def get_rank_position(user_id: int) -> int | None:
+    """Posicao no ranking (1 = maior XP), ou None se o usuario nao tem linha na tabela."""
+    with db_conn() as conn:
+        row = conn.execute("SELECT xp FROM user_levels WHERE user_id = ?", (user_id,)).fetchone()
+        if row is None:
+            return None
+        maiores = conn.execute(
+            "SELECT COUNT(*) FROM user_levels WHERE xp > ?", (row[0],)
+        ).fetchone()[0]
+    return maiores + 1
+
+
+def get_user_levels_count() -> int:
+    """Total de usuarios com XP registrado - o "de M" em "#N de M" do /rank."""
+    with db_conn() as conn:
+        return conn.execute("SELECT COUNT(*) FROM user_levels").fetchone()[0]
+
+
+def get_leaderboard(limit: int = 10) -> list[dict]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT user_id, display_name, xp, level FROM user_levels ORDER BY xp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [{"user_id": r[0], "display_name": r[1], "xp": r[2], "level": r[3]} for r in rows]
