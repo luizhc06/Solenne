@@ -1,7 +1,4 @@
 from datetime import datetime, timedelta, timezone
-import os
-import tempfile
-
 import pytest
 
 import db
@@ -17,13 +14,19 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def banco(monkeypatch):
-    """Banco temporario: os testes nao podem tocar no solenne.db de producao."""
-    with tempfile.TemporaryDirectory() as pasta:
-        caminho = os.path.join(pasta, "teste.db")
-        monkeypatch.setattr(db, "DB_PATH", caminho)
-        db.init_db()
-        yield db
+def banco(tmp_path, monkeypatch):
+    """Banco temporario: os testes nao podem tocar no solenne.db de producao.
+
+    Usa `tmp_path` do pytest, e nao `TemporaryDirectory`, porque no Windows o
+    sqlite segura o handle do arquivo e o rmtree do TemporaryDirectory estoura
+    PermissionError [WinError 32] no teardown — os 6 testes passavam e a
+    limpeza derrubava todos com erro. O `tmp_path` nao apaga na hora (o pytest
+    guarda as ultimas execucoes e limpa depois), entao nao esbarra no handle.
+    Mesma escolha que a fixture `isolated_db` acima ja fazia.
+    """
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "teste.db"))
+    db.init_db()
+    return db
 
 
 def _due(minutes=10):
