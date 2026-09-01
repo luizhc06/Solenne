@@ -20,6 +20,7 @@ EXTENSIONS = [
     "cogs.welcome",
     "cogs.polls",
     "cogs.leveling",
+    "cogs.videotools",
 ]
 
 

@@ -35,6 +35,7 @@ compartilhada em modulos de nivel superior:
 - `cogs/linksummary.py` — `/resumolink`: abre uma pagina e resume o conteudo real dela.
 - `cogs/reminders.py` — `/lembrete`, `/lembretes`, `/cancelarlembrete` e o loop de entrega.
 - `cogs/anime.py` — `/anime` e o radar de episodios novos via AniList.
+- `cogs/videotools.py` — `/paragif` e `/extrairaudio`, conversao de video via ffmpeg.
 
 ## Funcionalidades
 
@@ -115,6 +116,19 @@ compartilhada em modulos de nivel superior:
 - Radar automatico (a cada 30 min): avisa no canal quando sai episodio novo dessas series.
   Na primeira execucao ele so registra o estado atual, sem anunciar — senao despejaria de
   uma vez o ultimo episodio de tudo que esta sendo acompanhado.
+
+### Video
+- `/paragif <video>`: converte o anexo em GIF usando duas passadas de paleta do ffmpeg
+  (`palettegen` + `paletteuse`) - naive `-i video.gif` direto fica feio e pesado, a paleta
+  custom da um resultado bem melhor pro mesmo tamanho. Parametros opcionais: `duracao`
+  (2-20s, padrao 8, sempre a partir do inicio do video), `fps` (4-20, padrao 12) e `largura`
+  (120-640px, padrao 480).
+- `/extrairaudio <video>`: extrai o audio do anexo em mp3 (128kbps), wav ou m4a.
+- Os dois exigem um arquivo ANEXADO no proprio comando (nao um link) e checam o tamanho do
+  resultado contra `guild.filesize_limit` antes de mandar - se passar do limite do servidor,
+  avisa em vez de falhar silenciosamente, e sugere reduzir duracao/fps/largura.
+- Precisa de `ffmpeg` no PATH - ja vem instalado na imagem Docker (ver `Dockerfile`), mas se
+  for rodar fora de container precisa instalar a parte.
 
 ### Noticias
 - `/noticias`: resumo sob demanda, ou automatico todo dia ao meio-dia (horario de Brasilia)
