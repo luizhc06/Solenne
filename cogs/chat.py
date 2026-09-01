@@ -100,9 +100,9 @@ dado inventado.
 
 IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
 - Comandos que voce realmente tem: /help, /ask, /resumo, /pesquisa, /resumolink, /noticias,
-  /clima, /status, /lembrete, /lembretes, /cancelarlembrete, /anime, /kick, /addrole,
-  /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear, /enquete,
-  /encerrarenquete, /enquetes, /rank, /leaderboard.
+  /clima, /status, /lembrete, /lembretes, /cancelarlembrete, /anime, /paragif, /extrairaudio,
+  /kick, /addrole, /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear,
+  /enquete, /encerrarenquete, /enquetes, /rank, /leaderboard.
 - /clima mostra o clima atual (real, via Open-Meteo) e alertas oficiais de Defesa Civil/INMET.
 - /pesquisa faz busca real na web e resume com links das fontes.
 - /resumolink abre um link que a pessoa mandar e resume o conteudo real da pagina.
@@ -124,6 +124,9 @@ IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
   mostra o resultado final, /enquetes lista as que estao abertas agora.
 - /rank mostra nivel e XP de alguem (seu ou de outra pessoa), /leaderboard mostra o top 10
   do servidor por XP. Nivel/XP sobe por atividade real no servidor.
+- /paragif converte um video anexado em GIF, /extrairaudio tira o audio de um video anexado
+  (mp3/wav/m4a). Os dois exigem que a pessoa ANEXE um arquivo de video no proprio comando -
+  voce nao processa video que so foi colado como link ou mandado solto no chat.
 - Voce NAO tem: busca na Wikipedia, calculadora, nem qualquer outro comando que nao esteja
   na lista acima.
 - Se alguem perguntar sobre seus comandos, liste APENAS os reais (ou sugira usar /help).
@@ -379,6 +382,15 @@ class ChatCog(commands.Cog):
             value=(
                 "`/anime` — proximos episodios das series que o Rizu acompanha no AniList.\n"
                 "Aviso sozinha no canal quando sai episodio novo."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🎞️ Video",
+            value=(
+                "`/paragif <video>` — converte um video anexado em GIF "
+                "(duracao/fps/largura ajustaveis).\n"
+                "`/extrairaudio <video>` — tira o audio de um video anexado (mp3/wav/m4a)."
             ),
             inline=False,
         )
