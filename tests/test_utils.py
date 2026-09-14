@@ -159,12 +159,12 @@ def test_thinking_embed_nao_promete_tempo():
     assert "resposta em" not in autor
 
 
-def test_thinking_embed_poe_o_gif_no_thumbnail_nao_no_icone_do_author():
-    """Como icon_url do author o Discord reduz o GIF a um circulo de ~24px - pequeno
-    demais pra dar pra ver o que e. No thumbnail ele aparece de verdade."""
+def test_thinking_embed_poe_o_gif_no_icone_do_author_em_24px():
+    """Escolha do dono: o placeholder e um indicador de "nao travei", nao o assunto da
+    mensagem. O thumbnail (~80px, tamanho fixo pelo Discord) chegou a ser usado e voltou."""
     embed = thinking_embed()
-    assert embed.thumbnail.url == THINKING_GIF_URL
-    assert embed.author.icon_url is None
+    assert embed.author.icon_url == THINKING_GIF_URL
+    assert embed.thumbnail.url is None
 
 
 def test_thinking_embed_preserva_texto_customizado():

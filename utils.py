@@ -9,7 +9,7 @@ log = logging.getLogger("hermes-bot")
 AMBIENT_CHANNEL_NAMES = {"geral", "comidas", "bot", "videojogos-geral"}
 AMBIENT_COOLDOWN_SECONDS = 180
 
-THINKING_GIF_URL = "https://media.giphy.com/media/RgzryV9nRCMHPVVXPV/200w.gif"
+THINKING_GIF_URL = "https://media.giphy.com/media/RgzryV9nRCMHPVVXPV/100w.gif"
 
 URL_PATTERN = re.compile(r"https?://\S+")
 
@@ -150,12 +150,16 @@ def thinking_embed(text: str | None = None) -> discord.Embed:
     cinco call sites que passavam os dois (news, search, linksummary e os dois de
     videotools) tinham o numero silenciosamente ignorado - nunca chegou a aparecer.
 
-    O GIF vai no thumbnail, nao no icon_url do author: como icone do author o Discord
-    reduz a um circulo de ~24px, pequeno demais pra dar pra ver o que e.
+    O GIF fica no icon_url do author, um circulo de ~24px. Chegou a ir pro thumbnail
+    (~80px) em 13/09/2026, mas o dono preferiu de volta no tamanho pequeno: o placeholder
+    e um indicador de "nao travei", nao o assunto da mensagem. O Discord nao deixa
+    escolher o tamanho do thumbnail - e ~80px fixo -, entao 24px so existe aqui.
+
+    Por isso a URL aponta pra variante 100w e nao pra 200w: reduzido a 24px nao ha
+    diferenca visivel, e sao 85KB em vez de 314KB.
     """
     embed = discord.Embed(color=discord.Color.blurple())
-    embed.set_author(name=text or "🧠 Pensando...")
-    embed.set_thumbnail(url=THINKING_GIF_URL)
+    embed.set_author(name=text or "🧠 Pensando...", icon_url=THINKING_GIF_URL)
     return embed
 
 
