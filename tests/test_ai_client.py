@@ -1,5 +1,6 @@
 import asyncio
 
+import ai_client
 import httpx
 import pytest
 from openai import (
@@ -12,6 +13,7 @@ from openai import (
 
 from ai_client import (
     EmptyAIResponse,
+    TruncatedAIResponse,
     PriorityGate,
     THINK_BUDGET,
     THINK_LOW,
@@ -207,3 +209,107 @@ def test_friendly_message_never_leaks_the_exception_text():
 
 def test_unknown_error_falls_back_to_generic_message():
     assert "Deu ruim" in friendly_ai_error(RuntimeError("algo inesperado"))
+
+
+# --------------------------------------------------------------------------------------
+# Vazamento de raciocinio (06/09/2026)
+#
+# A Solenne despejou varios paragrafos de raciocinio cru no Discord, em ingles, cortados
+# no meio da frase - "So the user is asking... Wait, maybe they want...". Duas falhas
+# somadas: clean_reply so tirava o par <think></think> COMPLETO, e nada no codigo olhava
+# finish_reason. Quando o max_tokens corta a geracao no meio do trace, o fechamento nunca
+# chega, a tag nao casa e o raciocinio inteiro desce pro chat como se fosse resposta.
+# --------------------------------------------------------------------------------------
+
+
+def test_clean_reply_tira_raciocinio_truncado_sem_fechamento():
+    """O caso do vazamento: abriu <think> e o orcamento acabou antes de fechar."""
+    cru = "<think>So the user is asking about their AniList. Wait, maybe they want"
+    assert clean_reply(cru) == ""
+
+
+def test_clean_reply_tira_fechamento_orfao():
+    """Backend que separa o trace em reasoning_content mas ainda emite o </think>:
+    o que vem ANTES dele e raciocinio, so o que vem depois e resposta."""
+    cru = "pensando alto aqui</think>" + chr(10) + "oi, tudo certo"
+    assert clean_reply(cru) == "oi, tudo certo"
+
+
+def test_clean_reply_preserva_resposta_depois_do_par_completo():
+    """Regressao de ordem: se THINK_OPEN_RE rodasse antes de THINK_TAG_RE, ele comeria
+    a resposta boa junto com o trace."""
+    assert clean_reply("<think>hmm</think>a resposta de verdade") == "a resposta de verdade"
+
+
+class _FakeMessage:
+    def __init__(self, content, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _FakeChoice:
+    def __init__(self, content, finish_reason="stop", tool_calls=None):
+        self.message = _FakeMessage(content, tool_calls)
+        self.finish_reason = finish_reason
+
+
+def test_complete_rejeita_geracao_truncada(monkeypatch):
+    """Truncada e pior que vazia: vem COM texto e passa por qualquer checagem de
+    'veio vazio'. Tem que virar erro pra quem chamou poder refazer sem raciocinio."""
+    async def fake_request(*args, **kwargs):
+        return _FakeChoice("So the user is asking... Wait", finish_reason="length")
+
+    monkeypatch.setattr(ai_client, "_request", fake_request)
+    with pytest.raises(TruncatedAIResponse):
+        asyncio.run(ai_client._complete([{"role": "user", "content": "oi"}]))
+
+
+def test_complete_aceita_geracao_que_terminou_sozinha(monkeypatch):
+    async def fake_request(*args, **kwargs):
+        return _FakeChoice("oi, tudo certo", finish_reason="stop")
+
+    monkeypatch.setattr(ai_client, "_request", fake_request)
+    assert asyncio.run(ai_client._complete([{"role": "user", "content": "oi"}])) == "oi, tudo certo"
+
+
+def test_answer_with_tools_nao_entrega_rodada_truncada(monkeypatch):
+    """O caminho real do vazamento: a 1a rodada do chat (a que raciocina com orcamento)
+    voltou truncada e sem tool_call. Antes, esse texto ia direto pro Discord."""
+    chamadas = []
+
+    async def fake_request(mensagens, **kwargs):
+        chamadas.append(kwargs.get("thinking"))
+        if len(chamadas) == 1:
+            return _FakeChoice(
+                "So the user is asking about AniList. Wait, maybe they want",
+                finish_reason="length",
+            )
+        return _FakeChoice("nao tenho acesso a sua conta do AniList", finish_reason="stop")
+
+    monkeypatch.setattr(ai_client, "_request", fake_request)
+    monkeypatch.setattr(ai_client.tools, "tool_specs", lambda: [{"type": "function"}])
+
+    texto, _embeds = asyncio.run(ai_client.answer_with_tools([{"role": "user", "content": "oi"}]))
+    assert texto == "nao tenho acesso a sua conta do AniList"
+    assert "Wait, maybe they want" not in texto
+
+
+def test_think_and_answer_refaz_sem_raciocinio_quando_trunca(monkeypatch):
+    """Truncou com raciocinio ligado -> refaz com ele desligado, onde o orcamento
+    inteiro e da resposta."""
+    modos = []
+
+    async def fake_request(mensagens, **kwargs):
+        modo = kwargs.get("thinking")
+        modos.append(modo)
+        if modo == ai_client.THINK_BUDGET:
+            return _FakeChoice("raciocinio cru cortado no meio", finish_reason="length")
+        return _FakeChoice("resposta curta e em pt-BR", finish_reason="stop")
+
+    monkeypatch.setattr(ai_client, "_request", fake_request)
+    monkeypatch.setattr(ai_client, "REFINEMENT_ROUNDS", 0)
+    monkeypatch.setattr(ai_client, "HUMANIZE_PASS", False)
+
+    texto = asyncio.run(ai_client._think_and_answer([{"role": "user", "content": "oi"}]))
+    assert texto == "resposta curta e em pt-BR"
+    assert ai_client.THINK_OFF in modos
