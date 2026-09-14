@@ -153,7 +153,8 @@ def test_thinking_embed_nao_promete_tempo():
     errava nos dois sentidos - as vezes ela responde antes, as vezes passa dos 45s -
     e promessa quebrada e pior que nenhuma estimativa."""
     autor = thinking_embed().author.name
-    assert "Pensando" in autor
+    assert autor == "Pensando..."
+    assert "🧠" not in autor  # sem emoji de cerebro: escolha do dono
     assert "~" not in autor
     assert "20s" not in autor
     assert "resposta em" not in autor

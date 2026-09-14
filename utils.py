@@ -159,7 +159,7 @@ def thinking_embed(text: str | None = None) -> discord.Embed:
     diferenca visivel, e sao 85KB em vez de 314KB.
     """
     embed = discord.Embed(color=discord.Color.blurple())
-    embed.set_author(name=text or "🧠 Pensando...", icon_url=THINKING_GIF_URL)
+    embed.set_author(name=text or "Pensando...", icon_url=THINKING_GIF_URL)
     return embed
 
 
