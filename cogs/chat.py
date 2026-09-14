@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import OWNER_USER_ID, NEWS_TIMEZONE, DIAS_SEMANA
+from config import OWNER_USER_ID, NEWS_TIMEZONE, DIAS_SEMANA, ANILIST_USERNAME
 import tools
 from db import (
     load_recent_history,
@@ -125,7 +125,13 @@ IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
   lista os pendentes e /cancelarlembrete cancela um. Em conversa livre voce NAO precisa mandar
   ninguem usar /lembrete: use a ferramenta criar_lembrete e marque voce mesma.
 - /anime mostra os proximos episodios das series que o Rizu acompanha no AniList. Voce tambem
-  avisa sozinha no canal quando sai episodio novo dessas series.
+  avisa sozinha no canal quando sai episodio novo dessas series. NAO e uma lista fixa escrita
+  no seu codigo: o comando consulta a conta AniList do Rizu ({ANILIST_USERNAME}) na hora e le
+  a lista "assistindo" dela, entao ela muda sozinha quando ele comeca ou larga um anime. Voce
+  nao decora essa lista - pra saber o que tem nela agora, e so rodar /anime. Isso vale SO pra
+  conta do Rizu: voce nao consegue abrir a conta AniList de outra pessoa, nem favoritos, nem
+  historico, nem lista de personagens de ninguem. Se quem pediu for o proprio Rizu, a conta e
+  a DELE - responda "as series que voce esta acompanhando", nao "as do Rizu".
 - Moderacao automatica: voce detecta flood (mensagens repetidas, muitas seguidas, spam de
   mencao), apaga a mensagem e aplica timeout de 60s sozinha, e manda uma DM pro dono com a
   opcao de banir ou ignorar. Isso e real e acontece sem comando nenhum - se perguntarem se
@@ -147,6 +153,35 @@ IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
   Nunca finja ter uma capacidade que nao existe nem responda com informacao inventada se
   passando por dado real (tipo previsao do tempo "generica" - pra isso voce tem ferramenta).
 """
+
+
+def identidade_do_autor(eh_dono: bool) -> str:
+    """Diz pra Solenne se quem esta falando agora e o dono. Funcao pura, testavel.
+
+    A segunda pessoa no ramo do dono nao e enfeite. O resto do SYSTEM_PROMPT fala do
+    Rizu em TERCEIRA pessoa ("a IA pessoal do Rizu", "as series que o Rizu acompanha"),
+    porque foi escrito pensando no canal com varias pessoas. So dizer que "o ID bate"
+    nao desfazia esse enquadramento: ela sabia que era o dono e mesmo assim respondia
+    PRA ELE falando "as series que o Rizu acompanha", que le exatamente como nao ter
+    sido reconhecido - reclamacao real do dono em 06/09/2026.
+    """
+    if eh_dono:
+        quem = (
+            "VEIO do dono de verdade (o ID bate): quem esta falando com voce AGORA e o "
+            "proprio Rizu. Trate por voce, em segunda pessoa - nessa conversa, 'o Rizu' "
+            "e 'meu criador' viram 'voce'. Nunca fale dele em terceira pessoa (em vez "
+            "de 'as series que o Rizu acompanha', diga 'as series que voce acompanha'). "
+            "Nao peca que ele prove quem e, nem duvide."
+        )
+    else:
+        quem = "NAO veio do dono (o ID nao bate com o do dono)."
+    return (
+        f"\n\nO ID Discord do seu dono/criador (Rizu) e {OWNER_USER_ID}. "
+        "A mensagem atual " + quem
+        + " Use isso pra responder com certeza sobre quem e o dono, em vez de dizer que "
+        "nao reconhece ou de chutar - voce SEMPRE sabe se quem esta falando e o dono ou "
+        "nao, porque o ID vem no proprio contexto da mensagem."
+    )
 
 
 async def ask_hermes(
@@ -173,11 +208,7 @@ async def ask_hermes(
             f"essa data, entao NUNCA diga que um produto, evento ou lancamento 'nao existe' "
             f"so porque voce nao conhece - diga que nao tem informacao sobre ele e, se for o "
             f"caso, use a ferramenta de busca pra conferir."
-            + f"\n\nO ID Discord do seu dono/criador (Rizu) e {OWNER_USER_ID}. A mensagem atual "
-            + ("VEIO do dono de verdade (o ID bate)." if eh_dono else "NAO veio do dono (o ID nao bate com o do dono).")
-            + " Use isso pra responder com certeza sobre quem e o dono, em vez de dizer que "
-            + "nao reconhece ou de chutar - voce SEMPRE sabe se quem esta falando e o dono ou nao, "
-            + "porque o ID vem no proprio contexto da mensagem."
+            + identidade_do_autor(eh_dono)
         )
         if profile:
             system_content += f"\n\nO que voce ja sabe sobre {author_name}:\n{profile}"
