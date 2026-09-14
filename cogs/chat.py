@@ -1,3 +1,4 @@
+import json
 import time
 import asyncio
 import logging
@@ -8,7 +9,14 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import OWNER_USER_ID, NEWS_TIMEZONE, DIAS_SEMANA
-from db import load_recent_history, save_message, get_user_summary, load_user_messages
+import tools
+from db import (
+    load_recent_history,
+    save_message,
+    get_user_summary,
+    load_user_messages,
+    search_history,
+)
 from ai_client import ai_gate, answer_with_tools, _complete, friendly_ai_error, THINK_LOW
 from cogs.search import PESQUISAR_WEB_DESCRICAO
 from user_profile import schedule_profile_update
@@ -92,6 +100,11 @@ FERRAMENTAS QUE VOCE USA SOZINHA (nao precisa que ninguem peca comando):
 - `consultar_clima` - clima, previsao e alerta oficial do INMET. Use SEMPRE que perguntarem sobre
   tempo, chuva, temperatura, frio ou calor. Nunca responda clima de cabeca.
 - `resumir_link` - abre uma URL que ja apareceu na conversa e le o conteudo real dela.
+- `criar_lembrete` - marca um lembrete pra pessoa que esta falando com voce. Quando alguem pedir
+  pra ser lembrado de algo, CRIE o lembrete - nao mande usar /lembrete. Confirme depois o que ficou
+  marcado e pra quando.
+- `buscar_historico` - procura em TODO o historico deste canal, nao so nas ultimas mensagens. Use
+  quando falarem de algo ja conversado antes, em vez de chutar ou dizer que nao lembra.
 
 Ao usar ferramenta: nao anuncie que vai usar, nao narre o processo, nao cite o nome da ferramenta.
 So responda com o resultado, como se voce ja soubesse. Se a ferramenta devolver erro, diga
@@ -109,9 +122,8 @@ IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
 - /resumo resume as ultimas mensagens do canal atual (fofoca do que rolou).
 - /status mostra uptime, latencia e saude da Solenne.
 - /lembrete marca um lembrete pra depois (ex: "30m", "amanha as 9h", "25/12 10:00"), /lembretes
-  lista os pendentes e /cancelarlembrete cancela um. Se alguem pedir pra voce lembrar de algo
-  em conversa livre, sugira usar /lembrete - voce so lembra de verdade pelo comando, nunca
-  prometa lembrar de algo so porque pediram no chat.
+  lista os pendentes e /cancelarlembrete cancela um. Em conversa livre voce NAO precisa mandar
+  ninguem usar /lembrete: use a ferramenta criar_lembrete e marque voce mesma.
 - /anime mostra os proximos episodios das series que o Rizu acompanha no AniList. Voce tambem
   avisa sozinha no canal quando sai episodio novo dessas series.
 - Moderacao automatica: voce detecta flood (mensagens repetidas, muitas seguidas, spam de
@@ -176,7 +188,13 @@ async def ask_hermes(
             + [{"role": "user", "content": pergunta_atual}]
         )
 
-        reply, embeds = await answer_with_tools(base_messages)
+        # Identidade vem daqui, nunca do modelo: e o que impede criar_lembrete de
+        # marcar em nome de outra pessoa e buscar_historico de ler outro canal.
+        contexto = tools.ToolContext(
+            author_id=author_id, author_name=author_name, channel_id=channel_id
+        )
+        with tools.use_context(contexto):
+            reply, embeds = await answer_with_tools(base_messages)
 
         await loop.run_in_executor(None, save_message, channel_id, "user", author_name, user_msg)
         await loop.run_in_executor(None, save_message, channel_id, "assistant", None, reply)
@@ -463,3 +481,36 @@ class ChatCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ChatCog(bot))
+
+
+@tools.register(
+    name="buscar_historico",
+    description=(
+        "Procura em TODO o historico de conversa deste canal, nao so nas ultimas "
+        "mensagens. Use quando alguem falar de algo que ja foi conversado antes "
+        "('lembra do que a gente combinou?', 'o que eu falei sobre X semana passada?') "
+        "ou quando voce precisar conferir algo dito faz tempo em vez de chutar."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "termo": {
+                "type": "string",
+                "description": "Palavra-chave a procurar. Prefira UMA palavra marcante do assunto.",
+            }
+        },
+        "required": ["termo"],
+    },
+)
+async def tool_buscar_historico(termo: str) -> tools.ToolResult:
+    contexto = tools.current_context()
+    if contexto is None:
+        return tools.ToolResult(json.dumps({"erro": "sem contexto de canal"}, ensure_ascii=False))
+
+    loop = asyncio.get_event_loop()
+    achados = await loop.run_in_executor(None, search_history, contexto.channel_id, termo)
+    if not achados:
+        return tools.ToolResult(json.dumps(
+            {"encontrado": 0, "aviso": f"nada no historico deste canal com '{termo}'"}, ensure_ascii=False
+        ))
+    return tools.ToolResult(json.dumps({"encontrado": len(achados), "mensagens": achados}, ensure_ascii=False))

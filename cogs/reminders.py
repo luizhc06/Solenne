@@ -1,4 +1,5 @@
 import re
+import json
 import asyncio
 import logging
 import unicodedata
@@ -9,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from config import NEWS_TIMEZONE
+import tools
 from db import add_reminder, pop_due_reminders, list_reminders, delete_reminder
 
 log = logging.getLogger("hermes-bot")
@@ -259,3 +261,59 @@ class RemindersCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(RemindersCog(bot))
+
+
+@tools.register(
+    name="criar_lembrete",
+    description=(
+        "Marca um lembrete pra pessoa que esta falando com voce agora. Use quando ela "
+        "pedir pra ser lembrada de algo ('me lembra de X amanha', 'me avisa em 30 min'). "
+        "Voce NAO precisa mandar ninguem usar /lembrete - voce mesma cria."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "quando": {
+                "type": "string",
+                "description": (
+                    "Expressao de tempo como a pessoa falou: '30m', '2h', '3 dias', "
+                    "'amanha as 9h', '25/12 10:00', '18:30'. Atencao: '9h' sozinho e "
+                    "DURACAO (daqui a 9 horas); 'as 9h' e horario do relogio."
+                ),
+            },
+            "oque": {"type": "string", "description": "Do que lembrar, com as palavras da pessoa."},
+        },
+        "required": ["quando", "oque"],
+    },
+)
+async def tool_criar_lembrete(quando: str, oque: str) -> tools.ToolResult:
+    """Cria o lembrete SEMPRE pra quem esta falando, nunca pra terceiros.
+
+    O dono e o canal vem do contexto da requisicao, nao de parametro: se o modelo
+    pudesse escolher o user_id, bastaria pedir "cria um lembrete pro fulano" (ou ele se
+    confundir) pra marcar em nome de outra pessoa.
+    """
+    contexto = tools.current_context()
+    if contexto is None:
+        return tools.ToolResult(json.dumps({"erro": "sem contexto de quem pediu"}, ensure_ascii=False))
+
+    agora = datetime.now(NEWS_TIMEZONE)
+    due_at = parse_when(quando, agora)
+    if due_at is None:
+        return tools.ToolResult(json.dumps(
+            {"erro": f"nao entendi o prazo '{quando}'. Peca pra pessoa reformular (ex: '30m', 'amanha as 9h')."},
+            ensure_ascii=False,
+        ))
+    if due_at <= agora:
+        return tools.ToolResult(json.dumps(
+            {"erro": "esse horario ja passou; confirme a data com a pessoa"}, ensure_ascii=False
+        ))
+
+    loop = asyncio.get_event_loop()
+    reminder_id = await loop.run_in_executor(
+        None, add_reminder, contexto.author_id, contexto.channel_id, oque[:500], due_at
+    )
+    return tools.ToolResult(json.dumps(
+        {"criado": True, "id": reminder_id, "quando": format_due(due_at), "oque": oque[:500]},
+        ensure_ascii=False,
+    ))
