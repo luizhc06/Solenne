@@ -9,9 +9,7 @@ log = logging.getLogger("hermes-bot")
 AMBIENT_CHANNEL_NAMES = {"geral", "comidas", "bot", "videojogos-geral"}
 AMBIENT_COOLDOWN_SECONDS = 180
 
-THINKING_GIF_URL = "https://media.giphy.com/media/2WjpfxAI5MvC9Nl8U7/100w.gif"
-THINKING_ETA_SECONDS = 20
-NEWS_THINKING_ETA_SECONDS = 40
+THINKING_GIF_URL = "https://media.giphy.com/media/RgzryV9nRCMHPVVXPV/200w.gif"
 
 URL_PATTERN = re.compile(r"https?://\S+")
 
@@ -140,12 +138,24 @@ async def safe_followup_send(interaction: discord.Interaction, content, **kwargs
         await interaction.channel.send(content, **kwargs)
 
 
-def thinking_embed(text: str | None = None, eta_seconds: int = THINKING_ETA_SECONDS) -> discord.Embed:
-    text = text or f"🧠 Pensando... (resposta em ~{eta_seconds}s)"
-    # GIF no author (pequeno, topo) em vez de thumbnail (grande, centralizado) - fica
-    # discreto, tipo um indicador de "digitando..." em vez de dominar a mensagem.
+def thinking_embed(text: str | None = None) -> discord.Embed:
+    """Placeholder de "estou trabalhando nisso" enquanto a resposta real nao chega.
+
+    SEM estimativa de tempo, de proposito. Ate 13/09/2026 o padrao prometia "resposta em
+    ~20s" - numero fixo que errava nos dois sentidos: as vezes ela responde bem antes, e
+    com raciocinio ligado passa dos 45s. Palpite preciso e pior que nenhum, porque vira
+    promessa quebrada; quem esta olhando so precisa saber que ela nao travou.
+
+    O parametro eta_seconds saiu junto. Ele so era usado quando text era None, entao os
+    cinco call sites que passavam os dois (news, search, linksummary e os dois de
+    videotools) tinham o numero silenciosamente ignorado - nunca chegou a aparecer.
+
+    O GIF vai no thumbnail, nao no icon_url do author: como icone do author o Discord
+    reduz a um circulo de ~24px, pequeno demais pra dar pra ver o que e.
+    """
     embed = discord.Embed(color=discord.Color.blurple())
-    embed.set_author(name=text, icon_url=THINKING_GIF_URL)
+    embed.set_author(name=text or "🧠 Pensando...")
+    embed.set_thumbnail(url=THINKING_GIF_URL)
     return embed
 
 

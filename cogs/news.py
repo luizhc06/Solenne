@@ -16,7 +16,6 @@ from db import filter_unposted_links, mark_news_posted
 from ai_client import ai_gate, complete_json
 from utils import (
     thinking_embed,
-    NEWS_THINKING_ETA_SECONDS,
     TTLCache,
     truncate_sentences,
     truncate_words,
@@ -752,9 +751,7 @@ def find_news_channel(guild: discord.Guild) -> discord.TextChannel | None:
 
 async def post_news_digest(channel: discord.TextChannel, interactive: bool = False):
     placeholder = await channel.send(
-        embed=thinking_embed(
-            "📰 Buscando e resumindo as noticias do dia...", eta_seconds=NEWS_THINKING_ETA_SECONDS
-        )
+        embed=thinking_embed("📰 Buscando e resumindo as noticias do dia...")
     )
     sections, skipped, sem_relevancia = await build_news_digest(interactive=interactive)
     if not sections:

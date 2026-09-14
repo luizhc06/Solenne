@@ -1,5 +1,7 @@
 from utils import (
+    THINKING_GIF_URL,
     looks_like_question,
+    thinking_embed,
     mentions_solenne,
     split_discord_message,
     truncate_sentences,
@@ -144,3 +146,27 @@ def test_ttlcache_caches_negative_result():
     value, hit = cache.get("cidadeinexistente")
     assert hit is True
     assert value is None
+
+
+def test_thinking_embed_nao_promete_tempo():
+    """Ate 13/09/2026 o padrao era "Pensando... (resposta em ~20s)". O numero fixo
+    errava nos dois sentidos - as vezes ela responde antes, as vezes passa dos 45s -
+    e promessa quebrada e pior que nenhuma estimativa."""
+    autor = thinking_embed().author.name
+    assert "Pensando" in autor
+    assert "~" not in autor
+    assert "20s" not in autor
+    assert "resposta em" not in autor
+
+
+def test_thinking_embed_poe_o_gif_no_thumbnail_nao_no_icone_do_author():
+    """Como icon_url do author o Discord reduz o GIF a um circulo de ~24px - pequeno
+    demais pra dar pra ver o que e. No thumbnail ele aparece de verdade."""
+    embed = thinking_embed()
+    assert embed.thumbnail.url == THINKING_GIF_URL
+    assert embed.author.icon_url is None
+
+
+def test_thinking_embed_preserva_texto_customizado():
+    """Os comandos passam a propria legenda (/pesquisa, /noticias, /paragif...)."""
+    assert thinking_embed("🔎 Pesquisando...").author.name == "🔎 Pesquisando..."

@@ -167,7 +167,7 @@ class LinkSummaryCog(commands.Cog):
     @app_commands.command(name="resumolink", description="Abre um link e resume o conteudo da pagina")
     @app_commands.describe(url="O link que voce quer que eu leia")
     async def resumolink(self, interaction: discord.Interaction, url: str):
-        await interaction.response.send_message(embed=thinking_embed("🔗 Abrindo e lendo a pagina...", eta_seconds=25))
+        await interaction.response.send_message(embed=thinking_embed("🔗 Abrindo e lendo a pagina..."))
 
         try:
             title, summary = await summarize_url(url.strip())

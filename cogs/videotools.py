@@ -116,7 +116,7 @@ class VideoToolsCog(commands.Cog):
             return
 
         await interaction.response.send_message(
-            embed=thinking_embed("🎞️ Convertendo pra GIF...", eta_seconds=25)
+            embed=thinking_embed("🎞️ Convertendo pra GIF...")
         )
 
         try:
@@ -185,7 +185,7 @@ class VideoToolsCog(commands.Cog):
             return
 
         await interaction.response.send_message(
-            embed=thinking_embed("🎧 Extraindo o audio...", eta_seconds=20)
+            embed=thinking_embed("🎧 Extraindo o audio...")
         )
 
         try:

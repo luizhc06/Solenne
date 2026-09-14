@@ -169,7 +169,7 @@ class SearchCog(commands.Cog):
     @app_commands.describe(termo="O que voce quer pesquisar")
     async def pesquisa(self, interaction: discord.Interaction, termo: str):
         await interaction.response.send_message(
-            embed=thinking_embed(f"🔎 Pesquisando sobre \"{termo}\"...", eta_seconds=20)
+            embed=thinking_embed(f"🔎 Pesquisando sobre \"{termo}\"...")
         )
         loop = asyncio.get_event_loop()
 
