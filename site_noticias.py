@@ -1,24 +1,24 @@
-"""Publica o resumo de noticias no repositorio do site.
+"""Publica o resumo de noticias no site (rizu.is-a.dev).
 
-O site (rizuw.pages.dev) e estatico: nao consulta a VM, nao tem backend e nao
-sabe nada da Solenne. A ponte e um arquivo — ela grava src/data/noticias.json
-no repositorio do site pela API do GitHub, o Cloudflare Pages percebe o commit
-e recompila sozinho.
+O site e estatico: nao consulta a VM, nao tem backend e nao sabe nada da
+Solenne. A ponte e o Cloudflare KV — ela grava a chave "atual", e a pagina de
+noticias le pela funcao /api/noticias do proprio Pages.
 
-Por que arquivo e nao endpoint: a VM tem 1GB de RAM e divide espaco com outro
-container. Expor rota HTTP faria o trafego de visitantes competir com o laco de
-eventos do bot, e o sintoma seria a Solenne atrasando mensagem no Discord. Do
-jeito atual ela escreve uma vez por dia e ninguem que abre o site chega perto
-daqui.
+Por que KV e nao um endpoint aqui: a VM tem 1GB de RAM e divide espaco com
+outro container. Expor rota HTTP faria o trafego de visitantes competir com o
+laco de eventos do bot, e o sintoma seria a Solenne atrasando mensagem no
+Discord. Do jeito atual ela escreve uma vez por dia e ninguem que abre o site
+chega perto daqui.
 
-De quebra a recompilacao diaria atualiza tambem a lista do AniList do site, que
-e lida no build.
+Por que KV e nao commit no repositorio (era assim ate set/2026): gravar
+arquivo enchia o historico de "Noticias de 14/09" e obrigava o Cloudflare a
+recompilar o site inteiro pra trocar 15KB de JSON. No KV a noticia troca no
+instante da escrita.
 
-Sem SITE_REPO_TOKEN configurado, tudo aqui vira no-op: o resumo continua indo
-pro Discord normalmente.
+Sem CF_API_TOKEN configurado, tudo aqui vira no-op: o resumo continua indo pro
+Discord normalmente.
 """
 
-import base64
 import json
 import logging
 import re
@@ -26,11 +26,12 @@ from datetime import datetime
 
 import httpx
 
-from config import NEWS_TIMEZONE, SITE_REPO, SITE_REPO_TOKEN, SITE_ARQUIVO
+from config import CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE, NEWS_TIMEZONE
 
 log = logging.getLogger("hermes-bot")
 
-API = "https://api.github.com"
+API = "https://api.cloudflare.com/client/v4"
+CHAVE = "atual"
 TIMEOUT = 20.0
 
 # Os rotulos do Discord vem com emoji ("🎌 Geek & Anime"). O site tem tipografia
@@ -86,75 +87,42 @@ def montar_payload(
     return payload
 
 
-async def _sha_atual(cliente: httpx.AsyncClient) -> tuple[str | None, str | None]:
-    """Devolve (sha, conteudo) do arquivo que ja esta la, ou (None, None).
-
-    O sha e obrigatorio pra sobrescrever: sem ele a API recusa, achando que e
-    criacao de arquivo novo. O conteudo serve pra nao commitar igual.
-    """
-    r = await cliente.get(f"{API}/repos/{SITE_REPO}/contents/{SITE_ARQUIVO}")
-    if r.status_code == 404:
-        return None, None
-    r.raise_for_status()
-    dados = r.json()
-    bruto = base64.b64decode(dados.get("content", "")).decode("utf-8", "replace")
-    return dados.get("sha"), bruto
-
-
 async def publicar(payload: dict) -> bool:
-    """Grava o JSON no repositorio do site. Devolve se chegou a commitar.
+    """Grava o JSON no KV do site. Devolve se chegou a escrever.
 
     Nunca levanta: o resumo do Discord ja foi postado quando isso roda, e falhar
     aqui nao pode derrubar o que ja deu certo la.
     """
-    if not SITE_REPO_TOKEN or not SITE_REPO:
-        log.info("Publicacao no site desligada (SITE_REPO_TOKEN vazio).")
+    if not (CF_API_TOKEN and CF_ACCOUNT_ID and CF_KV_NAMESPACE):
+        log.info("Publicacao no site desligada (CF_API_TOKEN vazio).")
         return False
 
+    url = (
+        f"{API}/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces"
+        f"/{CF_KV_NAMESPACE}/values/{CHAVE}"
+    )
     corpo = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-    cabecalhos = {
-        "Authorization": f"Bearer {SITE_REPO_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "SolenneBot",
-    }
 
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT, headers=cabecalhos) as cliente:
-            sha, anterior = await _sha_atual(cliente)
-
-            # Commitar conteudo identico gera build no Cloudflare a toa. Compara
-            # ignorando o campo de data, que muda toda execucao mesmo sem noticia nova.
-            if anterior:
-                try:
-                    a = json.loads(anterior)
-                    a.pop("gerado_em", None)
-                    b = dict(payload)
-                    b.pop("gerado_em", None)
-                    if a == b:
-                        log.info("Noticias do site inalteradas, nao commitei.")
-                        return False
-                except json.JSONDecodeError:
-                    pass  # arquivo corrompido ou de exemplo: sobrescreve
-
-            hoje = datetime.now(NEWS_TIMEZONE).strftime("%d/%m/%Y")
-            envio = {
-                "message": f"Noticias de {hoje}",
-                "content": base64.b64encode(corpo.encode("utf-8")).decode("ascii"),
-                "committer": {"name": "Solenne", "email": "solenne@users.noreply.github.com"},
-            }
-            if sha:
-                envio["sha"] = sha
-
+        async with httpx.AsyncClient(timeout=TIMEOUT) as cliente:
             r = await cliente.put(
-                f"{API}/repos/{SITE_REPO}/contents/{SITE_ARQUIVO}", json=envio
+                url,
+                headers={
+                    "Authorization": f"Bearer {CF_API_TOKEN}",
+                    "User-Agent": "SolenneBot",
+                },
+                # O endpoint espera multipart com um campo "value", nao um JSON
+                # no corpo — o conteudo e opaco pro KV. Passar por `files` faz o
+                # httpx montar o multipart e o Content-Type sozinho.
+                files={"value": (None, corpo)},
             )
             r.raise_for_status()
-            log.info("Noticias publicadas no site (%s).", SITE_ARQUIVO)
+            log.info("Noticias publicadas no site (%d categorias).", len(payload.get("categorias", [])))
             return True
 
     except httpx.HTTPStatusError as e:
-        # 401/403 quase sempre e token expirado ou sem permissao de Contents:write.
+        # 401/403 quase sempre e token expirado ou sem Workers KV Storage:Edit.
+        # 404 costuma ser id de conta ou de namespace trocado.
         log.error(
             "Falha ao publicar noticias no site: HTTP %s — %s",
             e.response.status_code,
