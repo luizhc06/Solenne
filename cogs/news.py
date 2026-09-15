@@ -22,6 +22,7 @@ from utils import (
 )
 from views import FeedbackView
 from notify import notify_owner_text
+from site_noticias import montar_payload, publicar
 
 log = logging.getLogger("hermes-bot")
 
@@ -792,6 +793,24 @@ async def post_news_digest(channel: discord.TextChannel, interactive: bool = Fal
         await channel.send(f"-# Nada que valesse a pena em: {', '.join(sem_relevancia)}.")
     if skipped:
         await channel.send(f"-# Deu erro em: {', '.join(skipped)}.")
+
+    # O site recebe o mesmo conteudo que acabou de ir pro Discord. Fica por ultimo
+    # e engole o proprio erro de proposito: o resumo aqui ja foi entregue, e falhar
+    # na publicacao nao pode desfazer isso nem sujar o canal com aviso tecnico.
+    try:
+        chaves = {cat["label"]: chave for chave, cat in NEWS_CATEGORIES.items()}
+        await publicar(
+            montar_payload(
+                sections,
+                sem_relevancia,
+                skipped,
+                abertura=intro,
+                destaque=destaque,
+                chaves_por_rotulo=chaves,
+            )
+        )
+    except Exception:
+        log.exception("Falha ao publicar o resumo no site")
 
 
 class NewsCog(commands.Cog):
