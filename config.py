@@ -24,6 +24,9 @@ class AppConfig:
     ai_concurrency_limit: int = 4
     tavily_api_key: str = ""
     welcome_channel_id: int | None = None
+    cf_account_id: str = ""
+    cf_kv_namespace: str = ""
+    cf_api_token: str = ""
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -65,6 +68,12 @@ class AppConfig:
             welcome_channel_id=(
                 int(os.environ["WELCOME_CHANNEL_ID"]) if os.environ.get("WELCOME_CHANNEL_ID") else None
             ),
+            # Ponte com o site (site_noticias.py): o resumo diario tambem vai pro
+            # Cloudflare KV, de onde a pagina de noticias le. Token vazio = recurso
+            # desligado, o resumo continua indo so pro Discord.
+            cf_account_id=os.environ.get("CF_ACCOUNT_ID", ""),
+            cf_kv_namespace=os.environ.get("CF_KV_NAMESPACE", ""),
+            cf_api_token=os.environ.get("CF_API_TOKEN", ""),
         )
 
 try:
@@ -85,6 +94,9 @@ ANILIST_USERNAME = _cfg.anilist_username
 AI_CONCURRENCY_LIMIT = _cfg.ai_concurrency_limit
 TAVILY_API_KEY = _cfg.tavily_api_key
 WELCOME_CHANNEL_ID = _cfg.welcome_channel_id
+CF_ACCOUNT_ID = _cfg.cf_account_id
+CF_KV_NAMESPACE = _cfg.cf_kv_namespace
+CF_API_TOKEN = _cfg.cf_api_token
 HISTORY_WINDOW = 20
 
 # Recomendacao oficial da NVIDIA pro Nemotron 3 Super: temperature 1.0 e top_p 0.95
