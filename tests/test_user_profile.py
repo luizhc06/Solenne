@@ -116,3 +116,95 @@ def test_update_profile_truncado_mantem_o_resumo_anterior(monkeypatch):
 
     assert gravacoes == [], "um resumo truncado nunca pode ser gravado"
     assert store[7] == "gosta de hardware e acompanha noticias de tecnologia"
+
+
+def test_cap_summary_corta_no_teto_de_linhas():
+    """Achado na verificacao geral de 20/09/2026: o perfil do dono chegou a 25 linhas
+    porque o teto de 5 linhas so existia como pedido em texto no prompt, nunca garantido
+    no codigo. _cap_summary trava esse teto independente do modelo obedecer ou nao."""
+    texto = "\n".join(f"linha {i}" for i in range(1, 26))
+    resultado = user_profile._cap_summary(texto)
+    assert resultado.count("\n") + 1 <= user_profile.MAX_SUMMARY_LINES
+    assert resultado.splitlines() == ["linha 1", "linha 2", "linha 3", "linha 4", "linha 5"]
+
+
+def test_cap_summary_corta_linha_unica_gigante():
+    """Backstop de MAX_SUMMARY_CHARS: 5 linhas dentro do limite nao protege contra UMA
+    linha absurdamente longa - precisa de teto por tamanho tambem."""
+    linha_gigante = "gosta de " + ("tecnologia " * 200)
+    resultado = user_profile._cap_summary(linha_gigante)
+    assert len(resultado) <= user_profile.MAX_SUMMARY_CHARS + 1  # +1 pela reticencia
+
+
+def test_cap_summary_preserva_resumo_curto_sem_alterar():
+    texto = "Gosta de hardware.\nAcompanha noticias de tecnologia."
+    assert user_profile._cap_summary(texto) == texto
+
+
+def test_cap_summary_ignora_linhas_vazias():
+    texto = "linha 1\n\n\nlinha 2\n"
+    assert user_profile._cap_summary(texto) == "linha 1\nlinha 2"
+
+
+def test_update_profile_tira_mencoes_antes_de_montar_o_prompt(monkeypatch):
+    """Mesma familia do bug do ping de grupo (19/09/2026): sem isso, "<@111> <@222>"
+    solto virava a "mensagem" que o modelo recebia como fato sobre a pessoa, e as vezes
+    voltava gravado no resumo (achado na verificacao geral de 20/09/2026 - o perfil do
+    dono tinha "Nova mensagem: <@298511422898569216>" registrado como se fosse relevante)."""
+    prompts_recebidos = []
+
+    async def fake_complete(messages, temperature=0.3, **kwargs):
+        prompts_recebidos.append(messages[0]["content"])
+        return "resumo atualizado"
+
+    monkeypatch.setattr(user_profile, "get_user_summary", lambda uid: "")
+    monkeypatch.setattr(user_profile, "save_user_summary", lambda uid, nome, resumo: None)
+    monkeypatch.setattr(user_profile, "_complete", fake_complete)
+
+    asyncio.run(user_profile.update_profile(1, "Fulano", "<@111> <@222> vale a pena aprender Rust?"))
+
+    assert len(prompts_recebidos) == 1
+    assert "<@111>" not in prompts_recebidos[0]
+    assert "<@222>" not in prompts_recebidos[0]
+    assert "vale a pena aprender Rust?" in prompts_recebidos[0]
+
+
+def test_update_profile_ignora_mensagem_que_e_so_mencao(monkeypatch):
+    """Ping de grupo sem texto ("@Hud @Rizu @KrekNeto @Solenne", o incidente de
+    19/09/2026): depois de tirar as mencoes nao sobra nada util pra registrar. Nem
+    vale gastar uma chamada de IA - retorna cedo, sem tocar _complete nem o banco."""
+    chamou_ia = False
+
+    async def fake_complete(*args, **kwargs):
+        nonlocal chamou_ia
+        chamou_ia = True
+        return "nunca deveria rodar"
+
+    gravacoes = []
+    monkeypatch.setattr(user_profile, "get_user_summary", lambda uid: "")
+    monkeypatch.setattr(user_profile, "save_user_summary", lambda uid, nome, resumo: gravacoes.append(resumo))
+    monkeypatch.setattr(user_profile, "_complete", fake_complete)
+
+    asyncio.run(user_profile.update_profile(1, "Fulano", "<@111> <@222> <@333>"))
+
+    assert not chamou_ia
+    assert gravacoes == []
+
+
+def test_update_profile_aplica_cap_mesmo_se_modelo_ignorar_o_limite(monkeypatch):
+    """Fim a fim: mesmo quando o modelo devolve um resumo enorme (ignorando o "no maximo
+    5 linhas" do prompt), o que chega no banco respeita o teto do codigo."""
+    resumo_enorme = "\n".join(f"fato numero {i} sobre a pessoa" for i in range(1, 30))
+    gravacoes = []
+
+    async def fake_complete(*args, **kwargs):
+        return resumo_enorme
+
+    monkeypatch.setattr(user_profile, "get_user_summary", lambda uid: "")
+    monkeypatch.setattr(user_profile, "save_user_summary", lambda uid, nome, resumo: gravacoes.append(resumo))
+    monkeypatch.setattr(user_profile, "_complete", fake_complete)
+
+    asyncio.run(user_profile.update_profile(1, "Fulano", "mensagem qualquer"))
+
+    assert len(gravacoes) == 1
+    assert gravacoes[0].count("\n") + 1 <= user_profile.MAX_SUMMARY_LINES
