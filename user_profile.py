@@ -4,8 +4,18 @@ from collections import defaultdict
 
 from db import get_user_summary, save_user_summary
 from ai_client import _complete, ai_gate, TruncatedAIResponse
+from utils import strip_mentions, truncate_words
 
 log = logging.getLogger("hermes-bot")
+
+# O prompt pede "no maximo 5 linhas", mas o modelo nem sempre obedece: o perfil do
+# dono chegou a 25 linhas e 1726 chars (achado na verificacao geral de 20/09/2026),
+# porque nada no CODIGO garantia o teto - so o pedido em texto. Esse resumo entra
+# inteiro no system prompt de toda conversa da pessoa com ela, entao um perfil
+# inchado dilui as instrucoes de persona a cada mensagem. MAX_SUMMARY_CHARS e
+# backstop pra quando o modelo obedece as 5 linhas mas escreve linhas gigantes.
+MAX_SUMMARY_LINES = 5
+MAX_SUMMARY_CHARS = 500
 
 # update_profile() le o resumo atual, espera uma chamada de IA (que pode levar
 # varios segundos) e so entao grava - sem lock, duas tasks para o MESMO user_id
@@ -33,6 +43,14 @@ EXATAMENTE com o resumo atual, sem mudar nada. Responda somente com o resumo atu
 sem comentarios nem explicacoes."""
 
 
+def _cap_summary(text: str) -> str:
+    """Aplica o teto de 5 linhas / 500 chars no CODIGO, independente do modelo obedecer
+    o pedido em texto do PROFILE_UPDATE_PROMPT ou nao."""
+    linhas = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    cortado = "\n".join(linhas[:MAX_SUMMARY_LINES])
+    return truncate_words(cortado, MAX_SUMMARY_CHARS)
+
+
 async def update_profile(user_id: int, name: str, message: str):
     """Disparada via asyncio.create_task() de dentro de ask_hermes() (cogs/chat.py) - por
     ser uma task solta, NAO herdava o ai_gate.interactive() do chamador (achado do
@@ -41,6 +59,12 @@ async def update_profile(user_id: int, name: str, message: str):
     cota da API que o chat oficial respeita via fila. background() e o modo certo aqui -
     e trabalho de fundo de verdade, sem ninguem esperando na tela por ele."""
     loop = asyncio.get_event_loop()
+    # Tira mencoes cruas ANTES de virar prompt: sem isso, "<@111> <@222>" solto vai pro
+    # modelo como se fosse fato sobre a pessoa e as vezes volta gravado no resumo (achado
+    # na verificacao geral de 20/09/2026 - mesma familia do bug do ping de grupo).
+    message = strip_mentions(message)
+    if not message:
+        return
     async with _profile_locks[user_id]:
         current = await loop.run_in_executor(None, get_user_summary, user_id)
         prompt = PROFILE_UPDATE_PROMPT.format(name=name, current_summary=current or "(vazio ainda)", message=message)
@@ -65,7 +89,7 @@ async def update_profile(user_id: int, name: str, message: str):
         except Exception:
             log.exception("Erro ao atualizar perfil de %s", name)
             return
-        new_summary = new_summary.strip()
+        new_summary = _cap_summary(new_summary)
         if new_summary and new_summary != current:
             await loop.run_in_executor(None, save_user_summary, user_id, name, new_summary)
 
