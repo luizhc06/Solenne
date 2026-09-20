@@ -26,6 +26,7 @@ from utils import (
     is_ambient_channel,
     looks_like_question,
     mentions_solenne,
+    strip_mentions,
     split_discord_message,
     safe_edit_original,
     safe_followup_send,
@@ -302,8 +303,30 @@ class ChatCog(commands.Cog):
         called_by_name = mentions_solenne(message.content)
         direct = mentioned or replied_to_her or called_by_name
 
+        # Marcaram gente ALEM dela? Serve pras duas correcoes abaixo.
+        outros_marcados = (
+            bool(getattr(message, "role_mentions", None))
+            or getattr(message, "mention_everyone", False)
+            or any(u.id != self.bot.user.id for u in message.mentions)
+        )
+        # Responder (reply) a mensagem de outro humano e conversa entre os dois.
+        responde_outro_humano = (
+            message.reference is not None
+            and isinstance(message.reference.resolved, discord.Message)
+            and message.reference.resolved.author.id
+            not in (self.bot.user.id, message.author.id)
+        )
+
         ambient_trigger = False
-        if not direct and is_ambient_channel(message.channel) and looks_like_question(message.content):
+        if (
+            not direct
+            and is_ambient_channel(message.channel)
+            and looks_like_question(message.content)
+            # Mensagem endereçada a alguem especifico nao e deixa pra ela entrar: quem
+            # marca uma pessoa (ou responde a ela) esta falando COM aquela pessoa.
+            and not outros_marcados
+            and not responde_outro_humano
+        ):
             last = self.ambient_last_reply.get(message.channel.id, 0.0)
             if time.monotonic() - last >= AMBIENT_COOLDOWN_SECONDS:
                 ambient_trigger = True
@@ -311,8 +334,18 @@ class ChatCog(commands.Cog):
         if not direct and not ambient_trigger:
             return
 
-        content = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
-        if direct and not content:
+        # Tira TODAS as mencoes, nao so a dela: sobrando os outros como "<@111> <@222>",
+        # a string nao ficava vazia e esses IDs crus seguiam pro modelo como se fossem a
+        # pergunta - ver strip_mentions em utils.py.
+        content = strip_mentions(message.content)
+        if not content:
+            if outros_marcados:
+                # Ping de grupo sem texto ("@fulano @ciclano @Solenne"), tipo chamar a
+                # galera pra jogar: ela e uma das chamadas, nao a destinataria, e nao ha
+                # pergunta nenhuma pra responder. Fica quieta.
+                log.info("Ping de grupo sem texto em #%s, ignorando", message.channel)
+                return
+            # So a mencao dela, sozinha: e um "oi" mesmo.
             content = "Oi!"
         if not direct:
             self.ambient_last_reply[message.channel.id] = time.monotonic()

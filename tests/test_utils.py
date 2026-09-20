@@ -1,5 +1,6 @@
 from utils import (
     THINKING_GIF_URL,
+    strip_mentions,
     looks_like_question,
     thinking_embed,
     mentions_solenne,
@@ -171,3 +172,28 @@ def test_thinking_embed_poe_o_gif_no_icone_do_author_em_24px():
 def test_thinking_embed_preserva_texto_customizado():
     """Os comandos passam a propria legenda (/pesquisa, /noticias, /paragif...)."""
     assert thinking_embed("🔎 Pesquisando...").author.name == "🔎 Pesquisando..."
+
+
+def test_strip_mentions_tira_ping_de_grupo_inteiro():
+    """O incidente de 19/09/2026: "@Hud @Rizu @KrekNeto @Solenne" sem texto nenhum,
+    alguem chamando a galera pra jogar. O codigo tirava so a mencao da Solenne, entao
+    sobravam os outros tres como IDs crus - string nao vazia, que seguia pro modelo como
+    se fosse a pergunta. Com todas removidas sobra vazio, e o cog fica quieto."""
+    assert strip_mentions("<@111> <@222> <@333> <@444>") == ""
+
+
+def test_strip_mentions_cobre_apelido_e_cargo():
+    """<@!123> e a forma antiga de apelido e <@&123> e cargo - as duas apareciam cruas."""
+    assert strip_mentions("<@!111> <@&222>") == ""
+
+
+def test_strip_mentions_preserva_o_texto_de_verdade():
+    """Marcar alguem junto com uma pergunta de verdade continua sendo pergunta."""
+    assert strip_mentions("<@111> <@222> vale a pena migrar pra Postgres?") == (
+        "vale a pena migrar pra Postgres?"
+    )
+
+
+def test_strip_mentions_aceita_vazio():
+    assert strip_mentions("") == ""
+    assert strip_mentions(None) == ""

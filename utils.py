@@ -13,6 +13,24 @@ THINKING_GIF_URL = "https://media.giphy.com/media/RgzryV9nRCMHPVVXPV/100w.gif"
 
 URL_PATTERN = re.compile(r"https?://\S+")
 
+# Qualquer mencao do Discord: usuario (<@123>), usuario em forma antiga de apelido
+# (<@!123>) e cargo (<@&123>). Tirar SO a mencao da Solenne deixava as outras como
+# tokens crus de ID no texto que ia pro modelo - ver strip_mentions.
+MENTION_RE = re.compile(r"<@[!&]?\d+>")
+
+
+def strip_mentions(content: str) -> str:
+    """Tira TODAS as mencoes, nao so a da Solenne.
+
+    Em 19/09/2026 alguem chamou a galera pra jogar com uma mensagem que era so
+    "@Hud @Rizu @KrekNeto @Solenne", sem texto nenhum. O codigo tirava apenas a mencao
+    dela, entao sobravam os outros tres como "<@111> <@222> <@333>" - string nao vazia,
+    que seguiu pro modelo COMO SE FOSSE A PERGUNTA. Pior: o system prompt informa o ID
+    do dono, entao ela reconheceu o numero no meio dos tokens e respondeu "voce marcou
+    o Rizu ai", parecendo estar falando em nome dele.
+    """
+    return MENTION_RE.sub(" ", content or "").strip()
+
 
 def is_ambient_channel(channel) -> bool:
     name = getattr(channel, "name", "") or ""
