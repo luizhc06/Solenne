@@ -3,7 +3,7 @@ import logging
 from collections import defaultdict
 
 from db import get_user_summary, save_user_summary
-from ai_client import _complete, ai_gate
+from ai_client import _complete, ai_gate, TruncatedAIResponse
 
 log = logging.getLogger("hermes-bot")
 
@@ -46,7 +46,22 @@ async def update_profile(user_id: int, name: str, message: str):
         prompt = PROFILE_UPDATE_PROMPT.format(name=name, current_summary=current or "(vazio ainda)", message=message)
         try:
             async with ai_gate.background():
-                new_summary = await _complete([{"role": "user", "content": prompt}], temperature=0.3)
+                # max_tokens explicito: o prompt pede "no maximo 5 linhas", que cabe
+                # folgado em 400. Antes usava o padrao de 800 do _complete e, em
+                # 19/09/2026, uma geracao passou ate desse teto - ou seja, o modelo
+                # ignorou o limite de 5 linhas e saiu discorrendo. Estourar aqui e sinal
+                # de resposta fora do formato, nao de orcamento apertado.
+                new_summary = await _complete(
+                    [{"role": "user", "content": prompt}], temperature=0.3, max_tokens=400
+                )
+        except TruncatedAIResponse:
+            # Nao e erro de verdade, e condicao esperada: o resumo veio cortado no meio,
+            # e gravar isso sujaria pra sempre o que ela "sabe" sobre a pessoa - esse
+            # texto entra no system prompt de toda conversa dela com ela. Mantem o
+            # resumo anterior, que estava inteiro. WARNING em vez de exception() porque
+            # nao ha stack pra investigar: ja se sabe exatamente o que aconteceu.
+            log.warning("Resumo de %s veio truncado, mantendo o perfil anterior", name)
+            return
         except Exception:
             log.exception("Erro ao atualizar perfil de %s", name)
             return

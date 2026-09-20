@@ -89,3 +89,30 @@ def test_update_profile_usuarios_diferentes_nao_se_bloqueiam(monkeypatch):
     asyncio.run(cenario())
 
     assert pico_simultaneo == 2
+
+
+def test_update_profile_truncado_mantem_o_resumo_anterior(monkeypatch):
+    """Achado nos logs de producao (19/09/2026): o resumo estourou o max_tokens e, como
+    _complete passou a barrar geracao truncada, a excecao subia e caia no except
+    Exception generico - logada com stack trace como se fosse falha inesperada.
+
+    O comportamento certo e o que o teste trava: um resumo cortado no meio NAO substitui
+    o anterior. Esse texto entra no system prompt de toda conversa dela com a pessoa, e
+    gravar meia frase sujaria pra sempre o que ela "sabe" sobre ela."""
+    store = {7: "gosta de hardware e acompanha noticias de tecnologia"}
+    gravacoes = []
+
+    async def fake_complete(*args, **kwargs):
+        raise user_profile.TruncatedAIResponse("geracao truncada (max_tokens=400)")
+
+    monkeypatch.setattr(user_profile, "get_user_summary", lambda uid: store.get(uid, ""))
+    monkeypatch.setattr(
+        user_profile, "save_user_summary",
+        lambda uid, nome, resumo: gravacoes.append((uid, resumo)),
+    )
+    monkeypatch.setattr(user_profile, "_complete", fake_complete)
+
+    asyncio.run(user_profile.update_profile(7, "Rizu", "mensagem qualquer"))
+
+    assert gravacoes == [], "um resumo truncado nunca pode ser gravado"
+    assert store[7] == "gosta de hardware e acompanha noticias de tecnologia"
