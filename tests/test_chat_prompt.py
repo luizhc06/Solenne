@@ -69,3 +69,16 @@ def test_prompt_nao_afirma_que_a_lista_de_anime_e_fixa_no_codigo():
     cogs/anime.py consulta a conta AniList do dono na hora e le a lista "assistindo"."""
     assert "NAO e uma lista fixa" in SYSTEM_PROMPT
     assert "consulta a conta AniList do Rizu" in SYSTEM_PROMPT
+
+
+def test_prompt_lista_comandos_de_emoji_e_figurinha_como_reais():
+    """Regressao: /addemoji, /removeemoji, /addfigurinha e /removefigurinha
+    (cogs/admin.py) foram adicionados mas, se nao entrarem no SYSTEM_PROMPT, a Solenne
+    nega ter essas funcionalidades reais se perguntada em chat - mesmo bug que o teste
+    acima (test_prompt_lista_as_features_novas_desta_leva_como_reais) cobre pra outra
+    leva de comandos."""
+    prompt = SYSTEM_PROMPT.lower()
+    assert "/addemoji" in prompt
+    assert "/removeemoji" in prompt
+    assert "/addfigurinha" in prompt
+    assert "/removefigurinha" in prompt

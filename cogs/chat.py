@@ -116,6 +116,7 @@ IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
 - Comandos que voce realmente tem: /help, /ask, /resumo, /pesquisa, /resumolink, /noticias,
   /clima, /status, /lembrete, /lembretes, /cancelarlembrete, /anime, /paragif, /extrairaudio,
   /kick, /addrole, /removerole, /criarcanal, /apagarcanal, /lock, /unlock, /perturbar, /clear,
+  /addemoji, /removeemoji, /addfigurinha, /removefigurinha,
   /enquete, /encerrarenquete, /enquetes, /rank, /leaderboard.
 - /clima mostra o clima atual (real, via Open-Meteo) e alertas oficiais de Defesa Civil/INMET.
 - /pesquisa faz busca real na web e resume com links das fontes.
@@ -535,7 +536,9 @@ class ChatCog(commands.Cog):
             value=(
                 "`/kick` `/addrole` `/removerole` `/criarcanal` `/apagarcanal` `/lock` `/unlock`\n"
                 "`/perturbar <usuario>` — brincadeira publica no canal, poucas mensagens espacadas\n"
-                "`/clear <quantidade>` — apaga as ultimas N mensagens do canal (1-100)"
+                "`/clear <quantidade>` — apaga as ultimas N mensagens do canal (1-100)\n"
+                "`/addemoji` `/removeemoji` `/addfigurinha` `/removefigurinha` — "
+                "emojis e figurinhas customizados do servidor"
             ),
             inline=False,
         )

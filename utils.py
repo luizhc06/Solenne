@@ -32,6 +32,28 @@ def strip_mentions(content: str) -> str:
     return MENTION_RE.sub(" ", content or "").strip()
 
 
+# <:nome:123> (estatico) ou <a:nome:123> (animado) - o jeito que o proprio cliente do
+# Discord expande ":nome:" pra quando a pessoa cola um emoji customizado num campo de
+# texto, incluindo parametro de slash command. Usado por /removeemoji (cogs/admin.py)
+# pra aceitar tanto o emoji colado quanto o nome digitado na mao.
+CUSTOM_EMOJI_MENTION_RE = re.compile(r"<a?:(\w+):(\d+)>")
+
+
+def parse_emoji_ref(texto: str) -> tuple[str | None, int | None]:
+    """Devolve (nome, id) a partir do que a pessoa digitou em /removeemoji.
+
+    Se for uma mencao colada (<:nome:123> ou <a:nome:123>), devolve os dois - o id
+    identifica o emoji sem ambiguidade, mesmo que dois emojis do servidor tenham o
+    mesmo nome. Se nao for mencao, devolve (texto, None): so o nome, pra buscar por
+    nome no servidor (aceita tambem o nome vindo do autocomplete, que manda so o nome
+    puro como value)."""
+    texto = (texto or "").strip()
+    m = CUSTOM_EMOJI_MENTION_RE.fullmatch(texto)
+    if m:
+        return m.group(1), int(m.group(2))
+    return (texto or None), None
+
+
 def is_ambient_channel(channel) -> bool:
     name = getattr(channel, "name", "") or ""
     name = name.lower()

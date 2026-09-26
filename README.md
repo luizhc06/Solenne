@@ -201,7 +201,8 @@ compartilhada em modulos de nivel superior:
   repetidas ou spam de mencoes), apaga as mensagens e aplica timeout de 60s automaticamente.
   Manda uma DM para o dono com botoes de aprovacao para banir ou ignorar.
 - **Comandos administrativos** (`/kick`, `/addrole`, `/removerole`, `/criarcanal`,
-  `/apagarcanal`, `/lock`, `/unlock`): o bot tem as permissoes no Discord, mas os comandos
+  `/apagarcanal`, `/lock`, `/unlock`, `/addemoji`, `/removeemoji`, `/addfigurinha`,
+  `/removefigurinha`): o bot tem as permissoes no Discord, mas os comandos
   so executam se quem chamou for o dono (`OWNER_USER_ID`).
 - **Trava de servidor**: o bot sai automaticamente de qualquer servidor que nao seja o
   configurado em `ALLOWED_GUILD_ID`. Se alguem adicionar o bot em outro servidor, o dono
@@ -214,6 +215,18 @@ compartilhada em modulos de nivel superior:
   "Pesquisando clima", "Investigando noticias", etc.
 - `/status`: uptime, latencia com o Discord, saude da API do Open-Meteo (ping) e contagem
   de mensagens/perfis salvos no banco.
+
+### Emojis e figurinhas
+- `/addemoji <nome> <imagem>`: sobe um emoji customizado (PNG, JPG, GIF ou WEBP, ate
+  256KB - o teto do proprio Discord). `/removeemoji <emoji>` remove um existente -
+  aceita colar o emoji ou digitar o nome, com autocomplete sugerindo os emojis do
+  servidor conforme voce digita.
+- `/addfigurinha <nome> <descricao> <emoji_relacionado> <imagem>`: sobe uma figurinha
+  (PNG ou APNG, ate 512KB, ideal 320x320px - o Discord so aceita esses dois formatos
+  via comando, alem de Lottie em JSON, que este comando nao cobre).
+  `/removefigurinha <figurinha>` remove uma existente, tambem com autocomplete.
+- Restritos ao dono, como os outros comandos administrativos. Precisam da permissao
+  **Gerenciar Emojis e Figurinhas** no servidor (ver `## Permissoes do bot no Discord`).
 
 ### Qualidade de vida
 - **Conversor de links**: mensagens com links do Twitter/X, Instagram (post/reel) ou TikTok
@@ -260,10 +273,14 @@ habilitadas no Developer Portal do bot.
 
 ## Permissoes do bot no Discord
 
-O bot tem permissoes amplas (cargos, canais, kick, ban) porque os comandos
-administrativos passam por essas APIs — mas cada comando sensivel valida
-`interaction.user.id == OWNER_USER_ID` antes de executar. Ninguem alem do dono
-consegue de fato usar esses comandos, mesmo tendo acesso ao servidor.
+O bot tem permissoes amplas (cargos, canais, kick, ban, **Gerenciar Emojis e
+Figurinhas**) porque os comandos administrativos passam por essas APIs — mas
+cada comando sensivel valida `interaction.user.id == OWNER_USER_ID` antes de
+executar. Ninguem alem do dono consegue de fato usar esses comandos, mesmo
+tendo acesso ao servidor. Sem a permissao de Gerenciar Emojis e Figurinhas
+especificamente, `/addemoji`, `/removeemoji`, `/addfigurinha` e
+`/removefigurinha` respondem com `discord.Forbidden` tratado (mensagem
+amigavel, sem stack trace) em vez de travar.
 
 ## Testes
 

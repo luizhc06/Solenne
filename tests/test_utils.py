@@ -1,6 +1,7 @@
 from utils import (
     THINKING_GIF_URL,
     strip_mentions,
+    parse_emoji_ref,
     looks_like_question,
     thinking_embed,
     mentions_solenne,
@@ -197,3 +198,37 @@ def test_strip_mentions_preserva_o_texto_de_verdade():
 def test_strip_mentions_aceita_vazio():
     assert strip_mentions("") == ""
     assert strip_mentions(None) == ""
+
+
+def test_parse_emoji_ref_reconhece_emoji_estatico_colado():
+    """<:nome:123> e como o proprio cliente do Discord expande ":nome:" quando a
+    pessoa cola um emoji customizado num campo de texto - inclusive em parametro
+    de slash command."""
+    assert parse_emoji_ref("<:pesadelo:123456789012345678>") == ("pesadelo", 123456789012345678)
+
+
+def test_parse_emoji_ref_reconhece_emoji_animado_colado():
+    assert parse_emoji_ref("<a:dancinha:987654321098765432>") == ("dancinha", 987654321098765432)
+
+
+def test_parse_emoji_ref_aceita_nome_puro_sem_mencao():
+    """Cobre tanto quem digita o nome na mao quanto o value que volta do
+    autocomplete de /removeemoji - o autocomplete manda so o nome, sem mencao."""
+    assert parse_emoji_ref("pesadelo") == ("pesadelo", None)
+
+
+def test_parse_emoji_ref_tira_espaco_em_volta():
+    assert parse_emoji_ref("  pesadelo  ") == ("pesadelo", None)
+
+
+def test_parse_emoji_ref_vazio_devolve_nome_none():
+    assert parse_emoji_ref("") == (None, None)
+    assert parse_emoji_ref(None) == (None, None)
+
+
+def test_parse_emoji_ref_nao_confunde_mencao_de_usuario_com_emoji():
+    """<@123> e mencao de USUARIO (ver MENTION_RE) - CUSTOM_EMOJI_MENTION_RE exige o
+    nome entre os dois pontos, entao nao deveria casar isso como emoji."""
+    nome, emoji_id = parse_emoji_ref("<@123456789012345678>")
+    assert emoji_id is None
+    assert nome == "<@123456789012345678>"

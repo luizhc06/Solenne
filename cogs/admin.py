@@ -9,8 +9,37 @@ from discord.ext import commands
 from config import OWNER_USER_ID
 from notify import notify_owner_text
 from ai_client import ai_gate, _complete
+from utils import parse_emoji_ref
 
 log = logging.getLogger("hermes-bot")
+
+# Limites reais da API do Discord - checar ANTES de tentar upar poupa uma ida e volta
+# que ia falhar de qualquer jeito (mesmo raciocinio de MAX_INPUT_BYTES em
+# cogs/videotools.py). O resto (nome invalido, servidor no limite de slots) fica por
+# conta do discord.HTTPException mesmo - ver comentario em _criar_emoji/_criar_figurinha.
+EMOJI_MAX_BYTES = 256 * 1024
+STICKER_MAX_BYTES = 512 * 1024
+
+
+def _validar_imagem_emoji(imagem: discord.Attachment) -> str | None:
+    """Devolve uma mensagem de erro amigavel, ou None se o anexo parece valido."""
+    if imagem.content_type and not imagem.content_type.startswith("image/"):
+        return f"Isso ai parece ser `{imagem.content_type}`, nao imagem. Anexa PNG, JPG, GIF ou WEBP."
+    if imagem.size > EMOJI_MAX_BYTES:
+        return f"Essa imagem tem mais de {EMOJI_MAX_BYTES // 1024}KB, o Discord nao aceita pra emoji. Usa uma menor."
+    return None
+
+
+def _validar_imagem_figurinha(imagem: discord.Attachment) -> str | None:
+    """Mesma ideia de _validar_imagem_emoji, mas com o teto de figurinha (maior) e
+    restrito a PNG/APNG - o Discord nao aceita GIF/JPG/WEBP pra figurinha customizada,
+    so imagem estatica ou animada em PNG (alem de Lottie em JSON, que este comando nao
+    cobre)."""
+    if imagem.content_type and imagem.content_type not in ("image/png", "image/apng"):
+        return f"Isso ai parece ser `{imagem.content_type}`. O Discord so aceita PNG ou APNG pra figurinha."
+    if imagem.size > STICKER_MAX_BYTES:
+        return f"Essa imagem tem mais de {STICKER_MAX_BYTES // 1024}KB, o Discord nao aceita pra figurinha. Usa uma menor."
+    return None
 
 
 def owner_only():
@@ -233,6 +262,149 @@ class AdminCog(commands.Cog):
                 await channel.send(comeback.strip())
             except Exception:
                 log.exception("Erro ao gerar resposta do /perturbar")
+
+    # -----------------------------------------------------------------------------
+    # Emojis e figurinhas
+    # -----------------------------------------------------------------------------
+
+    async def _autocomplete_emoji(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Sugere os emojis customizados do servidor conforme a pessoa digita, pra nao
+        precisar acertar nome e maiusculas/minusculas de cabeca em /removeemoji."""
+        current = (current or "").lower()
+        emojis = interaction.guild.emojis if interaction.guild else []
+        filtrados = [e for e in emojis if current in e.name.lower()]
+        return [
+            app_commands.Choice(name=f"{e.name} ({'animado' if e.animated else 'estatico'})", value=e.name)
+            for e in filtrados[:25]
+        ]
+
+    async def _autocomplete_figurinha(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        current = (current or "").lower()
+        figurinhas = interaction.guild.stickers if interaction.guild else []
+        filtrados = [s for s in figurinhas if current in s.name.lower()]
+        return [app_commands.Choice(name=s.name, value=s.name) for s in filtrados[:25]]
+
+    @app_commands.command(name="addemoji", description="[Dono] Adiciona um emoji customizado ao servidor")
+    @owner_only()
+    @app_commands.describe(
+        nome="Nome do emoji (sem espacos, 2-32 caracteres)",
+        imagem="Imagem do emoji (PNG, JPG, GIF ou WEBP, ate 256KB)",
+    )
+    async def addemoji(self, interaction: discord.Interaction, nome: str, imagem: discord.Attachment):
+        erro = _validar_imagem_emoji(imagem)
+        if erro:
+            await interaction.response.send_message(erro, ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        try:
+            dados = await imagem.read()
+            emoji = await interaction.guild.create_custom_emoji(
+                name=nome, image=dados, reason=f"Adicionado por {interaction.user}"
+            )
+            await interaction.followup.send(f"✅ Emoji {emoji} (`{emoji.name}`) adicionado.")
+        except discord.Forbidden:
+            await interaction.followup.send("Sem permissao de Gerenciar Emojis e Figurinhas.", ephemeral=True)
+        except discord.HTTPException as exc:
+            # Surfaceia exc.text de proposito (diferente do padrao generico do resto do
+            # arquivo): e a mensagem de validacao do proprio Discord (nome invalido,
+            # limite de emojis do servidor atingido etc) e diz exatamente o que corrigir,
+            # em vez de um "tenta de novo" que esconde a causa.
+            log.exception("Erro ao criar emoji %s", nome)
+            await interaction.followup.send(
+                f"Deu erro ao criar o emoji: {exc.text or 'erro desconhecido'}", ephemeral=True
+            )
+
+    @app_commands.command(name="removeemoji", description="[Dono] Remove um emoji customizado do servidor")
+    @owner_only()
+    @app_commands.describe(emoji="Cole o emoji ou escolha o nome na lista")
+    @app_commands.autocomplete(emoji=_autocomplete_emoji)
+    async def removeemoji(self, interaction: discord.Interaction, emoji: str):
+        nome, emoji_id = parse_emoji_ref(emoji)
+        alvo = (
+            interaction.guild.get_emoji(emoji_id)
+            if emoji_id is not None
+            else discord.utils.get(interaction.guild.emojis, name=nome)
+        )
+        if alvo is None:
+            await interaction.response.send_message(
+                "Nao encontrei nenhum emoji com esse nome/id neste servidor.", ephemeral=True
+            )
+            return
+
+        nome_removido = alvo.name
+        try:
+            await alvo.delete(reason=f"Removido por {interaction.user}")
+            await interaction.response.send_message(f"🗑️ Emoji **{nome_removido}** removido.")
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "Sem permissao de Gerenciar Emojis e Figurinhas.", ephemeral=True
+            )
+
+    @app_commands.command(name="addfigurinha", description="[Dono] Adiciona uma figurinha ao servidor")
+    @owner_only()
+    @app_commands.describe(
+        nome="Nome da figurinha (2-30 caracteres)",
+        descricao="Descricao curta da figurinha",
+        emoji_relacionado="Um emoji padrao relacionado (ex: 😀) - usado na busca de figurinhas do Discord",
+        imagem="Imagem PNG ou APNG, ate 512KB, ideal 320x320px",
+    )
+    async def addfigurinha(
+        self,
+        interaction: discord.Interaction,
+        nome: str,
+        descricao: str,
+        emoji_relacionado: str,
+        imagem: discord.Attachment,
+    ):
+        erro = _validar_imagem_figurinha(imagem)
+        if erro:
+            await interaction.response.send_message(erro, ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        try:
+            arquivo = await imagem.to_file()
+            figurinha = await interaction.guild.create_sticker(
+                name=nome,
+                description=descricao,
+                emoji=emoji_relacionado,
+                file=arquivo,
+                reason=f"Adicionado por {interaction.user}",
+            )
+            await interaction.followup.send(f"✅ Figurinha **{figurinha.name}** adicionada.")
+        except discord.Forbidden:
+            await interaction.followup.send("Sem permissao de Gerenciar Emojis e Figurinhas.", ephemeral=True)
+        except discord.HTTPException as exc:
+            log.exception("Erro ao criar figurinha %s", nome)
+            await interaction.followup.send(
+                f"Deu erro ao criar a figurinha: {exc.text or 'erro desconhecido'}", ephemeral=True
+            )
+
+    @app_commands.command(name="removefigurinha", description="[Dono] Remove uma figurinha do servidor")
+    @owner_only()
+    @app_commands.describe(figurinha="Nome da figurinha a remover")
+    @app_commands.autocomplete(figurinha=_autocomplete_figurinha)
+    async def removefigurinha(self, interaction: discord.Interaction, figurinha: str):
+        alvo = discord.utils.get(interaction.guild.stickers, name=(figurinha or "").strip())
+        if alvo is None:
+            await interaction.response.send_message(
+                "Nao encontrei nenhuma figurinha com esse nome neste servidor.", ephemeral=True
+            )
+            return
+
+        nome_removido = alvo.name
+        try:
+            await alvo.delete(reason=f"Removido por {interaction.user}")
+            await interaction.response.send_message(f"🗑️ Figurinha **{nome_removido}** removida.")
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "Sem permissao de Gerenciar Emojis e Figurinhas.", ephemeral=True
+            )
 
 
 async def setup(bot: commands.Bot):
