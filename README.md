@@ -3,6 +3,9 @@
 IA pessoal do Rizu, rodando como bot de Discord. Usa a API da NVIDIA (NIM) como
 motor de inferencia e discord.py para integracao com o Discord.
 
+> 📋 **[Lista completa de comandos](COMANDOS.md)** — os 32 slash commands do bot,
+> com parametros e quem pode usar cada um.
+
 ## Stack
 
 - Python 3.12 + [discord.py](https://github.com/Rapptz/discord.py) (bot estruturado em Cogs/extensions)
