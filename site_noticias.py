@@ -1,21 +1,20 @@
-"""Publica o resumo de noticias no site (rizu.is-a.dev).
+"""Publica o resumo de noticias no site (rizu.insurge.space).
 
-O site e estatico: nao consulta a VM, nao tem backend e nao sabe nada da
-Solenne. A ponte e o Cloudflare KV — ela grava a chave "atual", e a pagina de
-noticias le pela funcao /api/noticias do proprio Pages.
+O site e estatico: nao consulta a VM e nao sabe nada da Solenne. A ponte e uma
+chamada que ela faz uma vez por dia: um PUT em /api/_kv/values/atual do proprio
+site, com um token, e a pagina de noticias le pela rota /api/noticias.
 
-Por que KV e nao um endpoint aqui: a VM tem 1GB de RAM e divide espaco com
-outro container. Expor rota HTTP faria o trafego de visitantes competir com o
-laco de eventos do bot, e o sintoma seria a Solenne atrasando mensagem no
-Discord. Do jeito atual ela escreve uma vez por dia e ninguem que abre o site
-chega perto daqui.
+Por que ela escreve no site e o site nao busca aqui: a VM tem 1GB de RAM e
+divide espaco com outro container. Expor rota HTTP faria o trafego de
+visitantes competir com o laco de eventos do bot, e o sintoma seria a Solenne
+atrasando mensagem no Discord. Do jeito atual ela escreve uma vez por dia e
+ninguem que abre o site chega perto daqui.
 
-Por que KV e nao commit no repositorio (era assim ate set/2026): gravar
-arquivo enchia o historico de "Noticias de 14/09" e obrigava o Cloudflare a
-recompilar o site inteiro pra trocar 15KB de JSON. No KV a noticia troca no
-instante da escrita.
+Por que nao commit no repositorio (era assim ate set/2026): gravar arquivo
+enchia o historico de "Noticias de 14/09" e obrigava a recompilar o site
+inteiro pra trocar 15KB de JSON. Assim a noticia troca no instante da escrita.
 
-Sem CF_API_TOKEN configurado, tudo aqui vira no-op: o resumo continua indo pro
+Sem SITE_TOKEN configurado, tudo aqui vira no-op: o resumo continua indo pro
 Discord normalmente.
 """
 
@@ -26,11 +25,10 @@ from datetime import datetime
 
 import httpx
 
-from config import CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE, NEWS_TIMEZONE
+from config import NEWS_TIMEZONE, SITE_TOKEN, SITE_URL
 
 log = logging.getLogger("hermes-bot")
 
-API = "https://api.cloudflare.com/client/v4"
 CHAVE = "atual"
 TIMEOUT = 20.0
 
@@ -93,14 +91,11 @@ async def publicar(payload: dict) -> bool:
     Nunca levanta: o resumo do Discord ja foi postado quando isso roda, e falhar
     aqui nao pode derrubar o que ja deu certo la.
     """
-    if not (CF_API_TOKEN and CF_ACCOUNT_ID and CF_KV_NAMESPACE):
-        log.info("Publicacao no site desligada (CF_API_TOKEN vazio).")
+    if not SITE_TOKEN:
+        log.info("Publicacao no site desligada (SITE_TOKEN vazio).")
         return False
 
-    url = (
-        f"{API}/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces"
-        f"/{CF_KV_NAMESPACE}/values/{CHAVE}"
-    )
+    url = f"{SITE_URL}/api/_kv/values/{CHAVE}"
     corpo = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
     try:
@@ -108,21 +103,20 @@ async def publicar(payload: dict) -> bool:
             r = await cliente.put(
                 url,
                 headers={
-                    "Authorization": f"Bearer {CF_API_TOKEN}",
+                    "Authorization": f"Bearer {SITE_TOKEN}",
                     "User-Agent": "SolenneBot",
+                    "Content-Type": "application/json; charset=utf-8",
                 },
-                # O endpoint espera multipart com um campo "value", nao um JSON
-                # no corpo — o conteudo e opaco pro KV. Passar por `files` faz o
-                # httpx montar o multipart e o Content-Type sozinho.
-                files={"value": (None, corpo)},
+                # O corpo e o JSON cru: o site guarda como esta.
+                content=corpo.encode("utf-8"),
             )
             r.raise_for_status()
             log.info("Noticias publicadas no site (%d categorias).", len(payload.get("categorias", [])))
             return True
 
     except httpx.HTTPStatusError as e:
-        # 401/403 quase sempre e token expirado ou sem Workers KV Storage:Edit.
-        # 404 costuma ser id de conta ou de namespace trocado.
+        # 401 e token diferente do arquivo storage/token do servidor (ou arquivo
+        # ausente: ai a API do site fica desligada). 404 e SITE_URL errado.
         log.error(
             "Falha ao publicar noticias no site: HTTP %s — %s",
             e.response.status_code,
