@@ -43,13 +43,13 @@ def test_marcar_cinco_amigos_diferentes_nao_e_punido():
     assert acao is None
 
 
-def test_avisa_na_segunda_mensagem_marcando_a_mesma_pessoa():
+def test_avisa_depois_de_varias_mensagens_marcando_a_mesma_pessoa():
     counts = mention_counts(f"<@{RIZU}>")
     acao, _motivo = mention_verdict(counts, {RIZU: MENTION_WARN_AT})
     assert acao == "avisar"
 
 
-def test_pune_na_terceira_mensagem_marcando_a_mesma_pessoa():
+def test_pune_quem_continua_marcando_a_mesma_pessoa():
     counts = mention_counts(f"<@{RIZU}>")
     acao, motivo = mention_verdict(counts, {RIZU: MENTION_PUNISH_AT})
     assert acao == "punir"
@@ -58,6 +58,12 @@ def test_pune_na_terceira_mensagem_marcando_a_mesma_pessoa():
 
 def test_primeira_mencao_nao_faz_nada():
     acao, _motivo = mention_verdict(mention_counts(f"<@{RIZU}>"), {RIZU: 1})
+    assert acao is None
+
+
+def test_tres_mencoes_seguidas_ja_nao_dao_castigo():
+    """Era castigo na 3a mensagem ate nov/2026 - rigoroso demais."""
+    acao, _motivo = mention_verdict(mention_counts(f"<@{RIZU}>"), {RIZU: 3})
     assert acao is None
 
 
