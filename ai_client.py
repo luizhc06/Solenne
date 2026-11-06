@@ -20,6 +20,7 @@ import httpx
 from config import (
     NVIDIA_API_KEY,
     MODEL,
+    FALLBACK_MODEL,
     REFINEMENT_ROUNDS,
     REASONING_BUDGET,
     HUMANIZE_PASS,
@@ -267,7 +268,23 @@ def clean_reply(text: str) -> str:
     return text.strip()
 
 
-async def _request(
+async def _request(messages: list[dict], **kwargs):
+    """Chama o modelo principal e, se ele sumir (404 depois dos retries), o reserva.
+
+    O 404 "Function ... Not found for account" e a NVIDIA tirando a implantacao do ar:
+    sem reserva, o bot ficava mudo ate alguem trocar HERMES_MODEL na mao.
+    """
+    try:
+        return await _request_model(MODEL, messages, **kwargs)
+    except APIStatusError as exc:
+        if exc.status_code != 404 or not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
+            raise
+        log.warning("Modelo %s deu 404, tentando o reserva %s", MODEL, FALLBACK_MODEL)
+        return await _request_model(FALLBACK_MODEL, messages, **kwargs)
+
+
+async def _request_model(
+    model: str,
     messages: list[dict],
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = 800,
@@ -291,7 +308,7 @@ async def _request(
     for attempt in range(AI_MAX_ATTEMPTS):
         try:
             completion = await client_ai.chat.completions.create(
-                model=MODEL,
+                model=model,
                 messages=messages,
                 temperature=temperature,
                 top_p=DEFAULT_TOP_P,

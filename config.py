@@ -16,6 +16,7 @@ class AppConfig:
     allowed_guild_id: int
     owner_user_id: int
     model: str = "nvidia/nemotron-3-super-120b-a12b"
+    fallback_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
     db_path: str = "/app/data/solenne.db"
     refinement_rounds: int = 0
     reasoning_budget: int = 768
@@ -40,6 +41,7 @@ class AppConfig:
             # ser melhor servido no NIM. Motivo da troca foi latencia: o chat faz
             # REFINEMENT_ROUNDS + 2 chamadas sequenciais por resposta.
             model=os.environ.get("HERMES_MODEL", "nvidia/nemotron-3-super-120b-a12b"),
+            fallback_model=os.environ.get("HERMES_FALLBACK_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b"),
             db_path=os.environ.get("DB_PATH", "/app/data/solenne.db"),
             # Padrao 0 desde ago/2026: o refino manual (rascunho -> critica -> reescrita)
             # existia pra compensar um modelo que respondia de primeira, sem pensar. O
@@ -82,6 +84,7 @@ except KeyError as e:
 NVIDIA_API_KEY = _cfg.nvidia_api_key
 DISCORD_TOKEN = _cfg.discord_token
 MODEL = _cfg.model
+FALLBACK_MODEL = _cfg.fallback_model
 ALLOWED_GUILD_ID = _cfg.allowed_guild_id
 OWNER_USER_ID = _cfg.owner_user_id
 DB_PATH = _cfg.db_path
