@@ -313,3 +313,32 @@ def test_think_and_answer_refaz_sem_raciocinio_quando_trunca(monkeypatch):
     texto = asyncio.run(ai_client._think_and_answer([{"role": "user", "content": "oi"}]))
     assert texto == "resposta curta e em pt-BR"
     assert ai_client.THINK_OFF in modos
+
+
+def test_request_cai_no_modelo_reserva_quando_o_principal_da_404(monkeypatch):
+    chamados = []
+
+    async def fake_model(model, messages, **kwargs):
+        chamados.append(model)
+        if model == ai_client.MODEL:
+            raise _status_error(404)
+        return "ok"
+
+    monkeypatch.setattr(ai_client, "_request_model", fake_model)
+    monkeypatch.setattr(ai_client, "FALLBACK_MODEL", "reserva/x")
+    assert asyncio.run(ai_client._request([])) == "ok"
+    assert chamados == [ai_client.MODEL, "reserva/x"]
+
+
+def test_request_nao_usa_reserva_em_erro_que_nao_e_404(monkeypatch):
+    chamados = []
+
+    async def fake_model(model, messages, **kwargs):
+        chamados.append(model)
+        raise _status_error(401)
+
+    monkeypatch.setattr(ai_client, "_request_model", fake_model)
+    monkeypatch.setattr(ai_client, "FALLBACK_MODEL", "reserva/x")
+    with pytest.raises(APIStatusError):
+        asyncio.run(ai_client._request([]))
+    assert chamados == [ai_client.MODEL]
