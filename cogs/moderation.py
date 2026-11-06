@@ -12,8 +12,9 @@ from config import ALLOWED_GUILD_ID, OWNER_USER_ID
 log = logging.getLogger("hermes-bot")
 
 FLOOD_WINDOW_SECONDS = 5
-FLOOD_MAX_MESSAGES = 5
-FLOOD_MAX_DUPLICATES = 3
+# Afrouxado em nov/2026 (era 5 e 3): conversa animada batia no limite sem ser spam.
+FLOOD_MAX_MESSAGES = 8
+FLOOD_MAX_DUPLICATES = 5
 TIMEOUT_SECONDS = 60
 # Achado do conselho de 18/08/2026: ao contrario da regra de mencao (que ja avisa antes
 # de punir), a regra 1 (muitas mensagens seguidas) apagava e aplicava timeout na hora -
@@ -36,12 +37,14 @@ FLOOD_WARN_COOLDOWN_SECONDS = FLOOD_WINDOW_SECONDS * 4
 
 # Janela pra considerar que as mencoes ao mesmo alvo sao a mesma "sessao" de insistencia.
 MENTION_WINDOW_SECONDS = 60
-# Na 2a mensagem seguida marcando a mesma pessoa ela avisa; na 3a, castigo.
-MENTION_WARN_AT = 2
-MENTION_PUNISH_AT = 3
+# Avisa na 8a mensagem seguida marcando a mesma pessoa; castigo so na 10a. Ate nov/2026
+# era aviso na 2a e castigo na 3a - rigoroso demais: quando a Solenne travou (404 da
+# NVIDIA), quem chamou ela umas vezes pra ver se respondia levou castigo.
+MENTION_WARN_AT = 8
+MENTION_PUNISH_AT = 10
 MENTION_TIMEOUT_SECONDS = 10 * 60
 # Repetir o MESMO @ varias vezes dentro de uma unica mensagem (@rizu @rizu @rizu @rizu).
-MENTION_SAME_TARGET_IN_ONE_MSG = 4
+MENTION_SAME_TARGET_IN_ONE_MSG = 10
 # Muita gente DIFERENTE de uma vez so continua sendo tratado como raid, mas num patamar
 # em que nao da pra confundir com "marquei a galera": 5 amigos e conversa, 10 e ataque.
 MASS_MENTION_DISTINCT = 10
@@ -141,7 +144,7 @@ class ModerationCog(commands.Cog):
         self.msg_log: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
         self.recently_punished: dict[tuple[int, int], float] = {}
         # (guild, autor, alvo) -> deque[timestamp das mensagens que marcaram esse alvo]
-        self.mention_log: dict[tuple[int, int, str], deque] = defaultdict(lambda: deque(maxlen=10))
+        self.mention_log: dict[tuple[int, int, str], deque] = defaultdict(lambda: deque(maxlen=MENTION_PUNISH_AT))
         # Quem ja foi avisado nesta janela, pra nao repetir o aviso a cada mensagem.
         self.mention_warned: dict[tuple[int, int], float] = {}
         # Mesma ideia, pra regra 1 (muitas mensagens seguidas) do check_flood.
@@ -268,8 +271,9 @@ class ModerationCog(commands.Cog):
         agora = time.monotonic()
         historico: dict[str, int] = {}
         for alvo in counts:
-            # Marcar a si mesmo nao e incomodo pra ninguem.
-            if alvo == str(message.author.id):
+            # Marcar a si mesmo nao e incomodo pra ninguem. E marcar a propria Solenne e
+            # como se conversa com ela - insistir quando ela nao responde nao e abuso.
+            if alvo == str(message.author.id) or alvo == str(getattr(self.bot.user, "id", "")):
                 continue
             registro = self.mention_log[(message.guild.id, message.author.id, alvo)]
             registro.append(agora)

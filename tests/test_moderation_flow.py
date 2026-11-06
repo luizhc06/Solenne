@@ -18,6 +18,8 @@ from cogs.moderation import (
     FLOOD_MAX_DUPLICATES,
     FLOOD_MAX_MESSAGES,
     FLOOD_WARN_COOLDOWN_SECONDS,
+    MENTION_PUNISH_AT,
+    MENTION_WARN_AT,
     ModerationCog,
 )
 from config import ALLOWED_GUILD_ID, OWNER_USER_ID
@@ -212,33 +214,47 @@ def test_flood_roteia_mensagem_normal_com_mencao_pra_check_mentions(cog, clock):
     assert (guild.id, member.id, alvo) in cog.mention_log
 
 
-def test_mencao_avisa_na_segunda_e_pune_na_terceira_mensagem_seguida(cog, clock):
-    """Reproduz o fluxo real: 1a mencao nao faz nada, 2a avisa, 3a pune - e o historico
-    e por deque/cooldown compartilhado entre mensagens, nao um calculo isolado."""
+def test_mencao_so_avisa_e_pune_depois_de_varias_mensagens_seguidas(cog, clock):
+    """Reproduz o fluxo real: ate MENTION_WARN_AT-1 nao faz nada, em MENTION_WARN_AT
+    avisa, em MENTION_PUNISH_AT pune - o historico e por deque/cooldown compartilhado
+    entre mensagens, nao um calculo isolado."""
     guild = _fake_guild()
     member = _fake_member(7)
-    alvo_msg = f"<@111>"
+    alvo_msg = "<@111>"
 
-    m1 = _fake_message(guild, member, content=alvo_msg)
-    _run(cog.check_mentions(m1))
-    m1.reply.assert_not_awaited()
-    member.timeout.assert_not_awaited()
+    for n in range(1, MENTION_PUNISH_AT + 1):
+        msg = _fake_message(guild, member, content=alvo_msg)
+        _run(cog.check_mentions(msg))
+        if n < MENTION_WARN_AT:
+            msg.reply.assert_not_awaited()
+        elif n == MENTION_WARN_AT:
+            msg.reply.assert_awaited_once()
+        if n < MENTION_PUNISH_AT:
+            member.timeout.assert_not_awaited()
+        clock.advance(1)
 
-    clock.advance(1)
-    m2 = _fake_message(guild, member, content=alvo_msg)
-    _run(cog.check_mentions(m2))
-    m2.reply.assert_awaited_once()
-    member.timeout.assert_not_awaited()
-
-    clock.advance(1)
-    m3 = _fake_message(guild, member, content=alvo_msg)
-    _run(cog.check_mentions(m3))
     member.timeout.assert_awaited_once()
-    m3.delete.assert_awaited()
+    msg.delete.assert_awaited()
 
     # depois de punir, o historico daquele alvo e limpo - nao pode repunir na sequencia
     # seguinte so porque sobrou contagem acumulada de antes.
     assert (guild.id, member.id, "111") not in cog.mention_log
+
+
+def test_mencionar_a_propria_solenne_nunca_conta_como_insistencia(cog, clock):
+    """Chamar a Solenne e o jeito de falar com ela. Quando ela trava, a pessoa chama
+    de novo - isso nao pode virar castigo."""
+    cog.bot.user.id = 555
+    guild = _fake_guild()
+    member = _fake_member(9)
+
+    for _ in range(MENTION_PUNISH_AT + 2):
+        msg = _fake_message(guild, member, content="<@555> oi?")
+        _run(cog.check_mentions(msg))
+        msg.reply.assert_not_awaited()
+        clock.advance(1)
+
+    member.timeout.assert_not_awaited()
 
 
 def test_mencao_nao_repete_aviso_dentro_da_janela(cog, clock):
@@ -248,8 +264,9 @@ def test_mencao_nao_repete_aviso_dentro_da_janela(cog, clock):
     member = _fake_member(8)
     alvo_msg = f"<@222>"
 
-    _run(cog.check_mentions(_fake_message(guild, member, content=alvo_msg)))
-    clock.advance(1)
+    for _ in range(MENTION_WARN_AT - 1):
+        _run(cog.check_mentions(_fake_message(guild, member, content=alvo_msg)))
+        clock.advance(1)
     m2 = _fake_message(guild, member, content=alvo_msg)
     _run(cog.check_mentions(m2))
     m2.reply.assert_awaited_once()
