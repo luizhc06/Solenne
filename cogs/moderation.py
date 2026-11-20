@@ -2,7 +2,7 @@ import re
 import time
 import logging
 from datetime import timedelta, datetime, timezone
-from collections import Counter, defaultdict, deque
+from collections import defaultdict, deque
 
 import discord
 from discord.ext import commands
@@ -23,74 +23,13 @@ TIMEOUT_SECONDS = 60
 # dentro do cooldown, ai pune.
 FLOOD_WARN_COOLDOWN_SECONDS = FLOOD_WINDOW_SECONDS * 4
 
-# ---------------------------------------------------------------------------------
-# Mencoes
-#
-# A regra antiga era "5 ou mais mencoes numa mensagem = spam", e apagava na hora, com
-# timeout e DM pro dono com botao de banir. Marcar 5 amigos DIFERENTES numa mensagem e
-# conversa normal, e foi exatamente isso que aconteceu em producao (ago/2026): mensagem
-# legitima apagada, sem aviso nenhum.
-#
-# O que incomoda de verdade nao e mencionar MUITA gente, e mencionar a MESMA pessoa
-# repetidamente. Entao a contagem agora e por alvo, com aviso antes da punicao.
-# ---------------------------------------------------------------------------------
-
-# Janela pra considerar que as mencoes ao mesmo alvo sao a mesma "sessao" de insistencia.
-MENTION_WINDOW_SECONDS = 60
-# Avisa na 8a mensagem seguida marcando a mesma pessoa; castigo so na 10a. Ate nov/2026
-# era aviso na 2a e castigo na 3a - rigoroso demais: quando a Solenne travou (404 da
-# NVIDIA), quem chamou ela umas vezes pra ver se respondia levou castigo.
-MENTION_WARN_AT = 8
-MENTION_PUNISH_AT = 10
-MENTION_TIMEOUT_SECONDS = 10 * 60
-# Repetir o MESMO @ varias vezes dentro de uma unica mensagem (@rizu @rizu @rizu @rizu).
-MENTION_SAME_TARGET_IN_ONE_MSG = 10
-# Muita gente DIFERENTE de uma vez so continua sendo tratado como raid, mas num patamar
-# em que nao da pra confundir com "marquei a galera": 5 amigos e conversa, 10 e ataque.
-MASS_MENTION_DISTINCT = 10
 # Nao punir de novo em seguida pelo mesmo motivo (separado da duracao do castigo).
 PUNISH_COOLDOWN_SECONDS = 60
 
-# So conta mencao escrita no TEXTO. message.mentions inclui o autor da mensagem
-# respondida quando o reply pinga - contar isso faria conversa normal de reply virar
-# flood de mencao, que e o falso positivo mais facil de cometer aqui.
-USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
-ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
-
-
-def mention_counts(content: str) -> Counter:
-    """Quantas vezes cada alvo foi marcado NO TEXTO da mensagem.
-
-    Devolve Counter porque a repeticao importa: o payload do Discord deduplica
-    message.mentions, entao "@rizu @rizu @rizu" chegaria como um alvo so por ali.
-    """
-    alvos = USER_MENTION_RE.findall(content or "")
-    alvos += [f"role:{r}" for r in ROLE_MENTION_RE.findall(content or "")]
-    return Counter(alvos)
-
-
-def mention_verdict(counts: Counter, historico: dict[str, int]) -> tuple[str | None, str]:
-    """Decide o que fazer com as mencoes de uma mensagem. Pura, pra poder ser testada.
-
-    `historico` e quantas mensagens recentes (dentro da janela) ja marcaram cada alvo,
-    incluindo esta. Devolve (acao, motivo), com acao em None / "avisar" / "punir".
-    """
-    if not counts:
-        return None, ""
-
-    repetido = max(counts.values())
-    if repetido >= MENTION_SAME_TARGET_IN_ONE_MSG:
-        return "punir", f"marcou a mesma pessoa {repetido}x na mesma mensagem"
-
-    if len(counts) >= MASS_MENTION_DISTINCT:
-        return "punir", f"marcou {len(counts)} pessoas de uma vez"
-
-    pico = max(historico.values(), default=0)
-    if pico >= MENTION_PUNISH_AT:
-        return "punir", f"marcou a mesma pessoa em {pico} mensagens seguidas"
-    if pico == MENTION_WARN_AT:
-        return "avisar", "insistindo na mencao"
-    return None, ""
+# Mensagem que marca alguem (pessoa ou cargo) nunca entra no automod. A regra de mencao
+# castigava amigos que so estavam se marcando (nov/2026), e "@fulano" repetido tambem
+# caia na regra de mensagem repetida. Marcar gente e conversa, nao spam.
+MENTION_RE = re.compile(r"<@[!&]?\d+>")
 
 
 class ModerationView(discord.ui.View):
@@ -143,11 +82,7 @@ class ModerationCog(commands.Cog):
         # (guild_id, user_id) -> deque[(timestamp, message)]
         self.msg_log: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
         self.recently_punished: dict[tuple[int, int], float] = {}
-        # (guild, autor, alvo) -> deque[timestamp das mensagens que marcaram esse alvo]
-        self.mention_log: dict[tuple[int, int, str], deque] = defaultdict(lambda: deque(maxlen=MENTION_PUNISH_AT))
-        # Quem ja foi avisado nesta janela, pra nao repetir o aviso a cada mensagem.
-        self.mention_warned: dict[tuple[int, int], float] = {}
-        # Mesma ideia, pra regra 1 (muitas mensagens seguidas) do check_flood.
+        # Quem ja foi avisado pela regra 1 (muitas mensagens seguidas) do check_flood.
         self.flood_warned: dict[tuple[int, int], float] = {}
 
     async def notify_owner(
@@ -217,6 +152,8 @@ class ModerationCog(commands.Cog):
         member = message.author
         if member.bot or member.id == OWNER_USER_ID or member.guild_permissions.administrator:
             return
+        if MENTION_RE.search(message.content or ""):
+            return
 
         key = (message.guild.id, member.id)
         log_deque = self.msg_log[key]
@@ -254,57 +191,6 @@ class ModerationCog(commands.Cog):
                 await self.punish(message, "mensagens repetidas (spam)", repeats)
                 return
 
-        # regra 3: insistencia em mencionar a mesma pessoa (ver check_mentions)
-        await self.check_mentions(message)
-
-    async def check_mentions(self, message: discord.Message):
-        """Avisa antes de punir, e so pune insistencia de verdade.
-
-        A regra anterior apagava na hora qualquer mensagem com 5+ mencoes, sem aviso -
-        e "marquei 5 amigos" caiu nela em producao. Aqui a punicao exige repetir a MESMA
-        pessoa, e a pessoa recebe um aviso antes de qualquer coisa ser apagada.
-        """
-        counts = mention_counts(message.content)
-        if not counts:
-            return
-
-        agora = time.monotonic()
-        historico: dict[str, int] = {}
-        for alvo in counts:
-            # Marcar a si mesmo nao e incomodo pra ninguem. E marcar a propria Solenne e
-            # como se conversa com ela - insistir quando ela nao responde nao e abuso.
-            if alvo == str(message.author.id) or alvo == str(getattr(self.bot.user, "id", "")):
-                continue
-            registro = self.mention_log[(message.guild.id, message.author.id, alvo)]
-            registro.append(agora)
-            while registro and agora - registro[0] > MENTION_WINDOW_SECONDS:
-                registro.popleft()
-            historico[alvo] = len(registro)
-
-        acao, motivo = mention_verdict(counts, historico)
-        if acao is None:
-            return
-
-        if acao == "avisar":
-            chave = (message.guild.id, message.author.id)
-            ultimo_aviso = self.mention_warned.get(chave, 0.0)
-            if agora - ultimo_aviso < MENTION_WINDOW_SECONDS:
-                return
-            self.mention_warned[chave] = agora
-            minutos = MENTION_TIMEOUT_SECONDS // 60
-            # Nada e apagado aqui de proposito: o aviso e pra dar chance de parar.
-            await message.reply(
-                f"Opa, {message.author.display_name}, segura a mao na mencao — se continuar "
-                f"marcando a mesma pessoa eu vou te dar {minutos} minutos de castigo.",
-                mention_author=False,
-            )
-            return
-
-        # Punicao: limpa o historico pra nao repunir pela mesma sequencia assim que o
-        # cooldown acabar.
-        for alvo in counts:
-            self.mention_log.pop((message.guild.id, message.author.id, alvo), None)
-        await self.punish(message, motivo, [message], timeout_seconds=MENTION_TIMEOUT_SECONDS)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

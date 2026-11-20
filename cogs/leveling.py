@@ -18,7 +18,7 @@ log = logging.getLogger("hermes-bot")
 MIN_XP_MESSAGE_LENGTH = 3
 
 # Cooldown de ganho por usuario, em memoria (nao no banco) - ver LevelingCog.last_xp_at.
-# Igual ao padrao de PUNISH_COOLDOWN_SECONDS/MENTION_WINDOW_SECONDS em moderation.py: o
+# Igual ao padrao de PUNISH_COOLDOWN_SECONDS/FLOOD_WARN_COOLDOWN_SECONDS em moderation.py: o
 # banco so precisa ser tocado quando XP de fato e concedido (no maximo 1x/minuto/pessoa),
 # nao a cada mensagem so pra checar o cooldown. Trade-off aceito: um restart do bot zera
 # esse dict e a proxima mensagem de cada um pode conceder XP um pouco antes da hora -

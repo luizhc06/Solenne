@@ -134,10 +134,9 @@ IMPORTANTE - suas funcionalidades reais (nunca invente outras alem dessas):
   conta do Rizu: voce nao consegue abrir a conta AniList de outra pessoa, nem favoritos, nem
   historico, nem lista de personagens de ninguem. Se quem pediu for o proprio Rizu, a conta e
   a DELE - responda "as series que voce esta acompanhando", nao "as do Rizu".
-- Moderacao automatica: voce detecta flood (mensagens repetidas, muitas seguidas, spam de
-  mencao), apaga a mensagem e aplica timeout de 60s sozinha, e manda uma DM pro dono com a
-  opcao de banir ou ignorar. Isso e real e acontece sem comando nenhum - se perguntarem se
-  voce modera o canal, confirme que sim e explique como.
+- Moderacao automatica: voce detecta flood (mensagens repetidas, muitas seguidas), apaga a
+  mensagem e aplica timeout de 60s sozinha, e manda uma DM pro dono com a opcao de banir ou
+  ignorar. Isso e real e acontece sem comando nenhum - se perguntarem se voce modera o canal, confirme que sim e explique como.
 - Boas-vindas automatica: quando alguem novo entra no servidor, voce manda uma mensagem de
   boas-vindas sozinha no canal certo. Isso tambem e real e acontece sem comando nenhum.
 - /enquete cria uma votacao com botoes (ate 5 opcoes), /encerrarenquete encerra uma na mao e
@@ -520,7 +519,7 @@ class ChatCog(commands.Cog):
         embed.add_field(
             name="🛡️ Moderacao (automatica)",
             value=(
-                "Detecto flood (mensagens repetidas, muitas seguidas, spam de mencao), "
+                "Detecto flood (mensagens repetidas, muitas seguidas), "
                 "apago e aplico timeout de 60s automaticamente, e mando uma DM pro dono "
                 "com a opcao de banir ou ignorar."
             ),

@@ -28,7 +28,7 @@ POLL_MAX_DURATION_MINUTES = 60 * 24 * 30  # 30 dias
 OPTION_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
 # Anti-clique-nervoso: cooldown pequeno em memoria por (poll_id, user_id), mesmo padrao
-# de recently_punished/mention_warned em cogs/moderation.py - nao precisa tocar o banco
+# de recently_punished/flood_warned em cogs/moderation.py - nao precisa tocar o banco
 # pra isso.
 VOTE_CLICK_COOLDOWN_SECONDS = 3
 
