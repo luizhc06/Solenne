@@ -1,9 +1,8 @@
 """Testes de integracao pra maquina de estados do automod.
 
-check_flood() e check_mentions() (cogs/moderation.py) sao o codigo que de fato decide
+check_flood() (cogs/moderation.py) e o codigo que de fato decide
 quando avisar/apagar/punir com base em estado compartilhado entre mensagens (deques de
-historico + cooldowns). Antes deste arquivo, so as pecas puras (mention_counts,
-mention_verdict) e punish() isolado tinham teste - o proprio bug documentado no topo do
+historico + cooldowns). Antes deste arquivo, so punish() isolado tinham teste - o proprio bug documentado no topo do
 arquivo (regra 1 do flood punindo sem avisar) so foi descoberto em producao. Aqui a
 sequencia de mensagens e simulada de verdade, avancando um relogio falso, pra pegar
 regressao de janela/cooldown ANTES de producao.
@@ -18,8 +17,6 @@ from cogs.moderation import (
     FLOOD_MAX_DUPLICATES,
     FLOOD_MAX_MESSAGES,
     FLOOD_WARN_COOLDOWN_SECONDS,
-    MENTION_PUNISH_AT,
-    MENTION_WARN_AT,
     ModerationCog,
 )
 from config import ALLOWED_GUILD_ID, OWNER_USER_ID
@@ -197,81 +194,15 @@ def test_flood_regra2_mensagem_repetida_pune_sem_avisar(cog, clock):
     member.timeout.assert_awaited_once()
 
 
-# ---------------------------------------------------------------------------------
-# Mencoes: check_flood roteia pra check_mentions (regra 3) quando 1 e 2 nao disparam
-# ---------------------------------------------------------------------------------
-
-
-def test_flood_roteia_mensagem_normal_com_mencao_pra_check_mentions(cog, clock):
-    """Uma mensagem isolada, sem estourar flood, ainda passa pela checagem de mencao
-    (regra 3) - e o encadeamento real que on_message usa em producao."""
+def test_marcar_amigo_nunca_da_castigo(cog, clock):
+    """Marcar o mesmo amigo varias vezes seguidas, ate com a mesma mensagem, nao pode
+    gerar aviso nem castigo: era o falso positivo de nov/2026."""
     guild = _fake_guild()
     member = _fake_member(6)
-    alvo = "111"
-
-    _run(cog.check_flood(_fake_message(guild, member, content=f"<@{alvo}>")))
-
-    assert (guild.id, member.id, alvo) in cog.mention_log
-
-
-def test_mencao_so_avisa_e_pune_depois_de_varias_mensagens_seguidas(cog, clock):
-    """Reproduz o fluxo real: ate MENTION_WARN_AT-1 nao faz nada, em MENTION_WARN_AT
-    avisa, em MENTION_PUNISH_AT pune - o historico e por deque/cooldown compartilhado
-    entre mensagens, nao um calculo isolado."""
-    guild = _fake_guild()
-    member = _fake_member(7)
-    alvo_msg = "<@111>"
-
-    for n in range(1, MENTION_PUNISH_AT + 1):
-        msg = _fake_message(guild, member, content=alvo_msg)
-        _run(cog.check_mentions(msg))
-        if n < MENTION_WARN_AT:
-            msg.reply.assert_not_awaited()
-        elif n == MENTION_WARN_AT:
-            msg.reply.assert_awaited_once()
-        if n < MENTION_PUNISH_AT:
-            member.timeout.assert_not_awaited()
-        clock.advance(1)
-
-    member.timeout.assert_awaited_once()
-    msg.delete.assert_awaited()
-
-    # depois de punir, o historico daquele alvo e limpo - nao pode repunir na sequencia
-    # seguinte so porque sobrou contagem acumulada de antes.
-    assert (guild.id, member.id, "111") not in cog.mention_log
-
-
-def test_mencionar_a_propria_solenne_nunca_conta_como_insistencia(cog, clock):
-    """Chamar a Solenne e o jeito de falar com ela. Quando ela trava, a pessoa chama
-    de novo - isso nao pode virar castigo."""
-    cog.bot.user.id = 555
-    guild = _fake_guild()
-    member = _fake_member(9)
-
-    for _ in range(MENTION_PUNISH_AT + 2):
-        msg = _fake_message(guild, member, content="<@555> oi?")
-        _run(cog.check_mentions(msg))
+    for _ in range(FLOOD_MAX_MESSAGES + 2):
+        msg = _fake_message(guild, member, content="<@111>")
+        _run(cog.check_flood(msg))
         msg.reply.assert_not_awaited()
-        clock.advance(1)
-
+        msg.delete.assert_not_awaited()
+        clock.advance(0.5)
     member.timeout.assert_not_awaited()
-
-
-def test_mencao_nao_repete_aviso_dentro_da_janela(cog, clock):
-    """Uma vez avisado, nao pode ficar mandando o mesmo aviso a cada mensagem dentro da
-    janela - so quando o pico muda pra punir (testado acima) ou a janela expira."""
-    guild = _fake_guild()
-    member = _fake_member(8)
-    alvo_msg = f"<@222>"
-
-    for _ in range(MENTION_WARN_AT - 1):
-        _run(cog.check_mentions(_fake_message(guild, member, content=alvo_msg)))
-        clock.advance(1)
-    m2 = _fake_message(guild, member, content=alvo_msg)
-    _run(cog.check_mentions(m2))
-    m2.reply.assert_awaited_once()
-
-    clock.advance(1)
-    m3 = _fake_message(guild, member, content="oi de novo sem mencionar")
-    _run(cog.check_mentions(m3))
-    m3.reply.assert_not_awaited()
