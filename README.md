@@ -43,11 +43,13 @@ compartilhada em modulos de nivel superior:
 ## Funcionalidades
 
 ### Chat com IA
-- `/ask <pergunta>` ou mencionar o bot: conversa via modelo `nvidia/nemotron-3-super-120b-a12b`
+- `/ask <pergunta>` ou mencionar o bot: conversa via modelo `nvidia/nemotron-3.5-super-vl-120b-a12b`
   na API da NVIDIA (trocado do `openai/gpt-oss-120b` em jul/2026 — 12B parametros ativos,
   2.2x a vazao do anterior e superior a ele nos benchmarks da classe; a motivacao foi
   latencia, ja que cada resposta custa varias chamadas sequenciais). O modelo e so a
-  env `HERMES_MODEL`, entao trocar de novo nao exige mudanca de codigo.
+  env `HERMES_MODEL`, entao trocar de novo nao exige mudanca de codigo. Em nov/2026 a NVIDIA
+  aposentou o `nemotron-3-super-120b-a12b` (410); o padrao passou ao sucessor de mesmo porte.
+  Se o principal der 404 ou 410, a resposta sai pelo `HERMES_FALLBACK_MODEL`.
   Persona propria (ver `SYSTEM_PROMPT` em `cogs/chat.py`) e **raciocinio nativo do
   modelo** (`enable_thinking` + `reasoning_budget`): UMA chamada por resposta, com a
   cadeia de pensamento voltando num campo separado (`reasoning_content`) que nunca chega
@@ -253,7 +255,7 @@ Ver `.env.example`. Copie para `.env` e preencha:
 |---|---|
 | `NVIDIA_API_KEY` | Chave da API NVIDIA NIM (integrate.api.nvidia.com) |
 | `DISCORD_TOKEN` | Token do bot no Discord Developer Portal |
-| `HERMES_MODEL` | Modelo usado no NIM (padrao: `nvidia/nemotron-3-super-120b-a12b`) |
+| `HERMES_MODEL` | Modelo usado no NIM (padrao: `nvidia/nemotron-3.5-super-vl-120b-a12b`) |
 | `ALLOWED_GUILD_ID` | ID do unico servidor onde o bot pode ficar |
 | `OWNER_USER_ID` | Seu ID de usuario no Discord (dono, recebe DMs de moderacao/seguranca) |
 | `AI_REASONING_BUDGET` | Teto de tokens de raciocinio por resposta de chat (padrao `768`; mais = mais profundo e mais lento) |

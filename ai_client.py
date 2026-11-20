@@ -269,17 +269,18 @@ def clean_reply(text: str) -> str:
 
 
 async def _request(messages: list[dict], **kwargs):
-    """Chama o modelo principal e, se ele sumir (404 depois dos retries), o reserva.
+    """Chama o modelo principal e, se ele sumir (404 depois dos retries, ou 410), o reserva.
 
     O 404 "Function ... Not found for account" e a NVIDIA tirando a implantacao do ar:
-    sem reserva, o bot ficava mudo ate alguem trocar HERMES_MODEL na mao.
+    sem reserva, o bot ficava mudo ate alguem trocar HERMES_MODEL na mao. O 410 e a
+    aposentadoria definitiva (nov/2026, nemotron-3-super): nao vale retentar, cai direto.
     """
     try:
         return await _request_model(MODEL, messages, **kwargs)
     except APIStatusError as exc:
-        if exc.status_code != 404 or not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
+        if exc.status_code not in (404, 410) or not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
             raise
-        log.warning("Modelo %s deu 404, tentando o reserva %s", MODEL, FALLBACK_MODEL)
+        log.warning("Modelo %s deu %s, tentando o reserva %s", MODEL, exc.status_code, FALLBACK_MODEL)
         return await _request_model(FALLBACK_MODEL, messages, **kwargs)
 
 
