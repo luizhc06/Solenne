@@ -112,6 +112,14 @@ def test_ytdlp_cmd_video_limita_tamanho_e_prefere_h264():
     assert "--extract-audio" not in cmd
 
 
+def test_ytdlp_cmd_so_passa_cookies_quando_tem_arquivo():
+    sem = build_ytdlp_cmd("https://youtu.be/x", "/tmp/a", "mp3", TEN_MB)
+    com = build_ytdlp_cmd("https://youtu.be/x", "/tmp/a", "mp3", TEN_MB, "/app/data/c.txt")
+    assert "--cookies" not in sem
+    assert com[com.index("--cookies") + 1] == "/app/data/c.txt"
+    assert com[-2:] == ["--", "https://youtu.be/x"]
+
+
 def test_youtube_error_message_reconhece_bloqueio_e_privado():
     assert "bloqueou" in youtube_error_message("ERROR: Sign in to confirm you're not a bot")
     assert "privado" in youtube_error_message("ERROR: Private video")

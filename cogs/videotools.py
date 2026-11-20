@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -29,6 +30,9 @@ AUDIO_CODECS = {"mp3": "libmp3lame", "wav": "pcm_s16le", "m4a": "aac"}
 YTDLP_TIMEOUT_SECONDS = 180
 YOUTUBE_MP3_KBPS = 128
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+# IP de datacenter (a VM da Oracle) cai no "Sign in to confirm you're not a bot": com
+# cookies de uma conta do YouTube nesse arquivo, o yt-dlp passa. Sem o arquivo, segue sem.
+YOUTUBE_COOKIES = os.environ.get("YTDLP_COOKIES", "/app/data/youtube-cookies.txt")
 
 
 class FFmpegError(Exception):
@@ -71,12 +75,14 @@ def max_mp3_seconds(limit_bytes: int, kbps: int = YOUTUBE_MP3_KBPS) -> int:
     return int(limit_bytes * 8 / (kbps * 1000) * 0.95)
 
 
-def build_ytdlp_cmd(url: str, out_dir: str, fmt: str, limit_bytes: int) -> list[str]:
+def build_ytdlp_cmd(url: str, out_dir: str, fmt: str, limit_bytes: int, cookies: str | None = None) -> list[str]:
     """Video longo demais ou ao vivo e filtrado antes de baixar: o yt-dlp sai sem arquivo."""
     cmd = [
         sys.executable, "-m", "yt_dlp", "--no-playlist", "--quiet", "--no-warnings",
         "--restrict-filenames", "--paths", out_dir, "--output", "%(title).80B.%(ext)s",
     ]
+    if cookies:
+        cmd += ["--cookies", cookies]
     if fmt == "mp3":
         cmd += [
             "--match-filter", f"!is_live & duration <= {max_mp3_seconds(limit_bytes)}",
@@ -137,7 +143,7 @@ async def _run_ytdlp(args: list[str]) -> None:
 
 def youtube_error_message(stderr: str) -> str:
     if "Sign in to confirm" in stderr:
-        return "O YouTube bloqueou o download a partir do servidor do bot (pediu login). Tenta mais tarde."
+        return "O YouTube bloqueou o download a partir do servidor do bot (pediu login). O dono precisa atualizar os cookies do YouTube."
     if "Private video" in stderr or "unavailable" in stderr.lower():
         return "Esse video e privado ou nao esta disponivel."
     return "Deu erro baixando esse video. Confere o link e tenta de novo."
@@ -326,7 +332,8 @@ class VideoToolsCog(commands.Cog):
         try:
             async with self.youtube_lock:
                 with tempfile.TemporaryDirectory() as tmp:
-                    await _run_ytdlp(build_ytdlp_cmd(link, tmp, fmt, limit))
+                    cookies = YOUTUBE_COOKIES if os.path.isfile(YOUTUBE_COOKIES) else None
+                    await _run_ytdlp(build_ytdlp_cmd(link, tmp, fmt, limit, cookies))
                     arquivos = [p for p in Path(tmp).iterdir() if p.is_file()]
                     if not arquivos:
                         if fmt == "mp3":

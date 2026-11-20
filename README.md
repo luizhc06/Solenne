@@ -134,8 +134,17 @@ compartilhada em modulos de nivel superior:
   download por vez. Video longo demais pro limite do servidor e recusado antes de baixar
   (no limite padrao de 10MB, o mp3 vai ate uns 10 minutos). Usa o `yt-dlp` com o `deno`,
   os dois instalados pelo `requirements.txt`; se o YouTube mudar e o comando parar, a
-  correcao costuma ser so subir a versao do `yt-dlp`. Se o YouTube bloquear o IP do
-  servidor (pedido de login), o bot avisa em vez de travar.
+  correcao costuma ser so subir a versao do `yt-dlp`.
+- **Cookies do YouTube:** o YouTube bloqueia o IP da VM da Oracle ("Sign in to confirm
+  you're not a bot"). A saida e um arquivo de cookies de uma conta do YouTube em
+  `data/youtube-cookies.txt` (ou no caminho da env `YTDLP_COOKIES`); sem ele, o bot avisa
+  que foi bloqueado. Use uma conta Google SECUNDARIA, nunca a principal: o YouTube pode
+  restringir a conta usada assim. Para exportar sem que os cookies girem logo depois:
+  abra uma janela anonima, entre na conta, abra youtube.com, exporte os cookies dessa
+  aba em formato Netscape (extensao "Get cookies.txt LOCALLY") e feche a janela anonima
+  sem sair da conta. Depois:
+  `scp youtube-cookies.txt ubuntu@<vm>:hermes-bot/data/` e `chmod 600` nele. Nao precisa
+  reiniciar o bot; quando o YouTube voltar a bloquear, repita a exportacao.
 - `/paragif` e `/extrairaudio` exigem um arquivo ANEXADO no proprio comando (nao um link) e checam o tamanho do
   resultado contra `guild.filesize_limit` antes de mandar - se passar do limite do servidor,
   avisa em vez de falhar silenciosamente, e sugere reduzir duracao/fps/largura.
