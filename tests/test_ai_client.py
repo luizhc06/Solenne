@@ -315,13 +315,14 @@ def test_think_and_answer_refaz_sem_raciocinio_quando_trunca(monkeypatch):
     assert ai_client.THINK_OFF in modos
 
 
-def test_request_cai_no_modelo_reserva_quando_o_principal_da_404(monkeypatch):
+@pytest.mark.parametrize("status", [404, 410])
+def test_request_cai_no_modelo_reserva_quando_o_principal_some(monkeypatch, status):
     chamados = []
 
     async def fake_model(model, messages, **kwargs):
         chamados.append(model)
         if model == ai_client.MODEL:
-            raise _status_error(404)
+            raise _status_error(status)
         return "ok"
 
     monkeypatch.setattr(ai_client, "_request_model", fake_model)

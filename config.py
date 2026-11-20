@@ -15,7 +15,7 @@ class AppConfig:
     discord_token: str
     allowed_guild_id: int
     owner_user_id: int
-    model: str = "nvidia/nemotron-3-super-120b-a12b"
+    model: str = "nvidia/nemotron-3.5-super-vl-120b-a12b"
     fallback_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
     db_path: str = "/app/data/solenne.db"
     refinement_rounds: int = 0
@@ -40,7 +40,7 @@ class AppConfig:
             # ele nos benchmarks da classe - e sendo modelo da propria NVIDIA, tende a
             # ser melhor servido no NIM. Motivo da troca foi latencia: o chat faz
             # REFINEMENT_ROUNDS + 2 chamadas sequenciais por resposta.
-            model=os.environ.get("HERMES_MODEL", "nvidia/nemotron-3-super-120b-a12b"),
+            model=os.environ.get("HERMES_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b"),
             fallback_model=os.environ.get("HERMES_FALLBACK_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b"),
             db_path=os.environ.get("DB_PATH", "/app/data/solenne.db"),
             # Padrao 0 desde ago/2026: o refino manual (rascunho -> critica -> reescrita)
