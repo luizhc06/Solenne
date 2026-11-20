@@ -129,7 +129,14 @@ compartilhada em modulos de nivel superior:
   (2-20s, padrao 8, sempre a partir do inicio do video), `fps` (4-20, padrao 12) e `largura`
   (120-640px, padrao 480).
 - `/extrairaudio <video>`: extrai o audio do anexo em mp3 (128kbps), wav ou m4a.
-- Os dois exigem um arquivo ANEXADO no proprio comando (nao um link) e checam o tamanho do
+- `/youtube <link> [formato]`: baixa um link do YouTube em mp3 (128kbps, padrao) ou em video
+  mp4 (ate 480p, H.264). So aceita youtube.com e youtu.be, sem playlist nem ao vivo, um
+  download por vez. Video longo demais pro limite do servidor e recusado antes de baixar
+  (no limite padrao de 10MB, o mp3 vai ate uns 10 minutos). Usa o `yt-dlp` com o `deno`,
+  os dois instalados pelo `requirements.txt`; se o YouTube mudar e o comando parar, a
+  correcao costuma ser so subir a versao do `yt-dlp`. Se o YouTube bloquear o IP do
+  servidor (pedido de login), o bot avisa em vez de travar.
+- `/paragif` e `/extrairaudio` exigem um arquivo ANEXADO no proprio comando (nao um link) e checam o tamanho do
   resultado contra `guild.filesize_limit` antes de mandar - se passar do limite do servidor,
   avisa em vez de falhar silenciosamente, e sugere reduzir duracao/fps/largura.
 - Precisa de `ffmpeg` no PATH - ja vem instalado na imagem Docker (ver `Dockerfile`), mas se
