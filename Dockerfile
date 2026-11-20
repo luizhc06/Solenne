@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 WORKDIR /app
-# ffmpeg fica de fora do python:3.12-slim - /paragif e /extrairaudio (cogs/videotools.py)
+# ffmpeg fica de fora do python:3.12-slim - /paragif, /extrairaudio e /youtube (cogs/videotools.py)
 # rodam ele via subprocess, entao precisa instalar antes de qualquer coisa em Python.
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*

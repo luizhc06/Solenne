@@ -3,3 +3,7 @@ openai==1.54.4
 httpx==0.27.2
 feedparser==6.0.11
 tzdata
+# yt-dlp quebra quando o YouTube muda: atualizar a versao se o /youtube parar.
+yt-dlp[default]==2026.10.26
+# Runtime de JS que o yt-dlp exige para o YouTube (vem como binario pelo pip).
+deno==2.9.8

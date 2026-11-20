@@ -4,6 +4,10 @@ from cogs.videotools import (
     build_paletteuse_cmd,
     build_audio_extract_cmd,
     AUDIO_CODECS,
+    build_ytdlp_cmd,
+    is_youtube_url,
+    max_mp3_seconds,
+    youtube_error_message,
 )
 
 
@@ -56,3 +60,60 @@ def test_audio_extract_cmd_picks_correct_codec_per_format():
     assert build_audio_extract_cmd("in.mp4", "out.m4a", "m4a")[
         build_audio_extract_cmd("in.mp4", "out.m4a", "m4a").index("-acodec") + 1
     ] == "aac"
+
+
+TEN_MB = 10 * 1024 * 1024
+
+
+def test_is_youtube_url_aceita_os_enderecos_do_youtube():
+    for url in [
+        "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+        "https://youtu.be/jNQXAC9IVRw",
+        "http://m.youtube.com/watch?v=x",
+        "https://music.youtube.com/watch?v=x",
+        "  https://YouTube.com/shorts/x  ",
+    ]:
+        assert is_youtube_url(url), url
+
+
+def test_is_youtube_url_recusa_outros_sites_e_truques():
+    for url in [
+        "https://youtube.com.evil.com/watch?v=x",
+        "https://evil.com/?u=https://youtube.com",
+        "ftp://youtube.com/x",
+        "youtube.com/watch?v=x",
+        "--exec rm",
+        "https://vimeo.com/1",
+    ]:
+        assert not is_youtube_url(url), url
+
+
+def test_max_mp3_seconds_cabe_no_limite():
+    segundos = max_mp3_seconds(TEN_MB)
+    assert segundos * 128_000 / 8 <= TEN_MB
+    assert 600 <= segundos <= 660
+
+
+def test_ytdlp_cmd_mp3_filtra_duracao_e_converte():
+    cmd = build_ytdlp_cmd("https://youtu.be/x", "/tmp/a", "mp3", TEN_MB)
+    assert cmd[-2:] == ["--", "https://youtu.be/x"]
+    assert "--no-playlist" in cmd
+    assert cmd[cmd.index("--audio-format") + 1] == "mp3"
+    assert f"duration <= {max_mp3_seconds(TEN_MB)}" in cmd[cmd.index("--match-filter") + 1]
+    assert "--max-filesize" not in cmd
+
+
+def test_ytdlp_cmd_video_limita_tamanho_e_prefere_h264():
+    cmd = build_ytdlp_cmd("https://youtu.be/x", "/tmp/a", "video", TEN_MB)
+    assert cmd[-2:] == ["--", "https://youtu.be/x"]
+    assert cmd[cmd.index("--max-filesize") + 1] == str(TEN_MB)
+    assert "vcodec:h264" in cmd[cmd.index("--format-sort") + 1]
+    assert cmd[cmd.index("--merge-output-format") + 1] == "mp4"
+    assert "--extract-audio" not in cmd
+
+
+def test_youtube_error_message_reconhece_bloqueio_e_privado():
+    assert "bloqueou" in youtube_error_message("ERROR: Sign in to confirm you're not a bot")
+    assert "privado" in youtube_error_message("ERROR: Private video")
+    assert "privado" in youtube_error_message("ERROR: [youtube] x: This video is unavailable")
+    assert "Confere o link" in youtube_error_message("algo inesperado")
